@@ -1,0 +1,37 @@
+{
+  "name": "bare-ws",
+  "version": "1.0.0",
+  "description": "WebSocket library for JavaScript",
+  "exports": {
+    ".": "./index.js",
+    "./package": "./package.json",
+    "./constants": "./lib/constants.js"
+  },
+  "files": [
+    "index.js",
+    "lib"
+  ],
+  "scripts": {
+    "test": "standard && bare test.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/holepunchto/bare-ws.git"
+  },
+  "author": "Holepunch",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/holepunchto/bare-ws/issues"
+  },
+  "homepage": "https://github.com/holepunchto/bare-ws#readme",
+  "dependencies": {
+    "bare-crypto": "^1.1.1",
+    "bare-events": "^2.3.1",
+    "bare-http1": "^3.5.2",
+    "bare-stream": "^2.0.1"
+  },
+  "devDependencies": {
+    "brittle": "^3.3.0",
+    "standard": "^17.0.0"
+  }
+}
