@@ -28,6 +28,7 @@
     "bare-crypto": "^1.1.1",
     "bare-events": "^2.3.1",
     "bare-http1": "^3.5.2",
+    "bare-https": "^1.1.0",
     "bare-stream": "^2.0.1"
   },
   "devDependencies": {
