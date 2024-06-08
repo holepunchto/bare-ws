@@ -5,7 +5,8 @@
   "exports": {
     ".": "./index.js",
     "./package": "./package.json",
-    "./constants": "./lib/constants.js"
+    "./constants": "./lib/constants.js",
+    "./errors": "./lib/errors.js"
   },
   "files": [
     "index.js",
@@ -25,7 +26,7 @@
   },
   "homepage": "https://github.com/holepunchto/bare-ws#readme",
   "dependencies": {
-    "bare-crypto": "^1.1.1",
+    "bare-crypto": "^1.2.0",
     "bare-events": "^2.3.1",
     "bare-http1": "^3.5.2",
     "bare-https": "^1.1.0",
