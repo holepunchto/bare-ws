@@ -13,17 +13,15 @@ test('basic', async (t) => {
   const server = new ws.Server({ port: 8080 })
 
   server.on('connection', (ws) => {
-    ws
-      .on('data', (data) => {
-        t.alike(data, Buffer.from('hello'))
+    ws.on('data', (data) => {
+      t.alike(data, Buffer.from('hello'))
 
-        ws.end()
+      ws.end()
+    }).on('close', () => {
+      server.close(() => {
+        t.pass('server closed')
       })
-      .on('close', () => {
-        server.close(() => {
-          t.pass('server closed')
-        })
-      })
+    })
   })
 
   server.on('listening', () => {
@@ -41,17 +39,15 @@ test('secure', async (t) => {
   const server = new ws.Server({ port: 8080, secure: true, ...options })
 
   server.on('connection', (ws) => {
-    ws
-      .on('data', (data) => {
-        t.alike(data, Buffer.from('hello'))
+    ws.on('data', (data) => {
+      t.alike(data, Buffer.from('hello'))
 
-        ws.end()
+      ws.end()
+    }).on('close', () => {
+      server.close(() => {
+        t.pass('server closed')
       })
-      .on('close', () => {
-        server.close(() => {
-          t.pass('server closed')
-        })
-      })
+    })
   })
 
   server.on('listening', () => {
@@ -69,17 +65,15 @@ test('ping pong', async (t) => {
   const server = new ws.Server({ port: 8080 })
 
   server.on('connection', (ws) => {
-    ws
-      .on('ping', (data) => {
-        t.alike(data, Buffer.from('hello'), 'received ping')
+    ws.on('ping', (data) => {
+      t.alike(data, Buffer.from('hello'), 'received ping')
 
-        ws.end()
+      ws.end()
+    }).on('close', () => {
+      server.close(() => {
+        t.pass('server closed')
       })
-      .on('close', () => {
-        server.close(() => {
-          t.pass('server closed')
-        })
-      })
+    })
   })
 
   server.on('listening', () => {
@@ -88,7 +82,9 @@ test('ping pong', async (t) => {
     const client = new ws.Socket({ port: 8080 })
 
     client
-      .on('pong', (data) => t.alike(data, Buffer.from('hello'), 'received pong'))
+      .on('pong', (data) =>
+        t.alike(data, Buffer.from('hello'), 'received pong')
+      )
       .on('open', () => client.ping('hello'))
   })
 })
