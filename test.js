@@ -88,3 +88,11 @@ test('ping pong', async (t) => {
       .on('open', () => client.ping('hello'))
   })
 })
+
+test('connection refused', (t) => {
+  t.plan(1)
+
+  const client = new ws.Socket({ port: 8080 })
+
+  client.on('error', (err) => t.ok(err))
+})
