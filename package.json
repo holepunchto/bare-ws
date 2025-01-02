@@ -1,6 +1,6 @@
 {
   "name": "bare-ws",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "WebSocket library for JavaScript",
   "exports": {
     ".": "./index.js",
