@@ -1,5 +1,6 @@
 import Buffer from 'bare-buffer'
 
+export const EOL: string
 export const EOF: string
 
 export const GUID: Buffer

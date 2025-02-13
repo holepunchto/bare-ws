@@ -7,9 +7,11 @@ import Buffer from 'bare-buffer'
 import WebSocket from './socket'
 import WebSocketError from './errors'
 
-type WebSocketServerOptions =
-  | ({ secure: true } & HTTPSServerConnectionOptions)
-  | ({ secure?: false } & HTTPServerConnectionOptions)
+interface WebSocketServerOptions
+  extends HTTPServerConnectionOptions,
+    HTTPSServerConnectionOptions {
+  secure?: boolean
+}
 
 interface WebSocketServerEvents extends DuplexEvents {
   connection: [socket: WebSocket, req: HTTPClientRequest]
