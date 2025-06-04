@@ -96,3 +96,29 @@ test('connection refused', (t) => {
 
   client.on('error', (err) => t.ok(err))
 })
+
+test.solo('large write', async (t) => {
+  t.plan(3)
+
+  const server = new ws.Server({ port: 8080 })
+
+  server.on('connection', (ws) => {
+    ws.on('data', (data) => {
+      t.alike(data, Buffer.alloc(4 * 1024 * 1024, 'hello'))
+
+      ws.end()
+    }).on('close', () => {
+      server.close(() => {
+        t.pass('server closed')
+      })
+    })
+  })
+
+  server.on('listening', () => {
+    t.pass('listening')
+
+    const client = new ws.Socket({ port: 8080 })
+
+    client.end(Buffer.alloc(4 * 1024 * 1024, 'hello'))
+  })
+})
