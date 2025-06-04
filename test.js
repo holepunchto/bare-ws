@@ -97,7 +97,7 @@ test('connection refused', (t) => {
   client.on('error', (err) => t.ok(err))
 })
 
-test.solo('large write', async (t) => {
+test('large write', async (t) => {
   t.plan(3)
 
   const server = new ws.Server({ port: 8080 })
