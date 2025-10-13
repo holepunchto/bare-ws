@@ -7,9 +7,7 @@ import Buffer from 'bare-buffer'
 import WebSocket from './socket'
 import WebSocketError from './errors'
 
-interface WebSocketServerOptions
-  extends HTTPServerConnectionOptions,
-    HTTPSServerConnectionOptions {
+interface WebSocketServerOptions extends HTTPServerConnectionOptions, HTTPSServerConnectionOptions {
   secure?: boolean
 }
 
@@ -18,9 +16,8 @@ interface WebSocketServerEvents extends DuplexEvents {
   listening: []
 }
 
-interface WebSocketServer<
-  M extends WebSocketServerEvents = WebSocketServerEvents
-> extends EventEmitter<M> {
+interface WebSocketServer<M extends WebSocketServerEvents = WebSocketServerEvents>
+  extends EventEmitter<M> {
   readonly listening: boolean
 
   address(): TCPSocketAddress
@@ -41,10 +38,7 @@ declare class WebSocketServer {
 declare namespace WebSocketServer {
   export { type WebSocketServerOptions, type WebSocketServerEvents }
 
-  export function handshake(
-    req: HTTPClientRequest,
-    cb: (err: WebSocketError | null) => void
-  ): void
+  export function handshake(req: HTTPClientRequest, cb: (err: WebSocketError | null) => void): void
 
   export function handshake(
     req: HTTPClientRequest,

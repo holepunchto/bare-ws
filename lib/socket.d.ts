@@ -18,8 +18,7 @@ interface WebSocketEvents extends DuplexEvents {
   pong: [payload: unknown]
 }
 
-interface WebSocket<M extends WebSocketEvents = WebSocketEvents>
-  extends Duplex<M> {
+interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<M> {
   ping(data: unknown): void
   pong(data: unknown): void
 }

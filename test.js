@@ -82,9 +82,7 @@ test('ping pong', async (t) => {
     const client = new ws.Socket({ port: 8080 })
 
     client
-      .on('pong', (data) =>
-        t.alike(data, Buffer.from('hello'), 'received pong')
-      )
+      .on('pong', (data) => t.alike(data, Buffer.from('hello'), 'received pong'))
       .on('open', () => client.ping('hello'))
   })
 })
