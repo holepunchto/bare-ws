@@ -1,11 +1,5 @@
 declare class WebSocketError extends Error {
-  constructor(
-    msg: string,
-    code: string,
-    status: number,
-    fn?: WebSocketError,
-    cause?: unknown
-  )
+  constructor(msg: string, code: string, status: number, fn?: WebSocketError, cause?: unknown)
 
   static NETWORK_ERROR(msg: string, cause?: unknown): WebSocketError
   static NOT_CONNECTED(msg?: string): WebSocketError
