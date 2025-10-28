@@ -21,9 +21,9 @@ interface WebSocketServer<M extends WebSocketServerEvents = WebSocketServerEvent
   readonly listening: boolean
 
   address(): TCPSocketAddress
-  close(cb?: (err: WebSocketError | null) => void): void
-  ref(): void
-  unref(): void
+  close(cb?: (err?: Error | null) => void): this
+  ref(): this
+  unref(): this
 }
 
 declare class WebSocketServer {
