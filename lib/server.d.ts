@@ -16,8 +16,9 @@ interface WebSocketServerEvents extends DuplexEvents {
   listening: []
 }
 
-interface WebSocketServer<M extends WebSocketServerEvents = WebSocketServerEvents>
-  extends EventEmitter<M> {
+interface WebSocketServer<
+  M extends WebSocketServerEvents = WebSocketServerEvents
+> extends EventEmitter<M> {
   readonly listening: boolean
 
   address(): TCPSocketAddress
