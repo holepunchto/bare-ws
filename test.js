@@ -7,7 +7,7 @@ const options = {
   key: fs.readFileSync('test/fixtures/cert.key')
 }
 
-test('basic', async (t) => {
+test('basic', (t) => {
   t.plan(3)
 
   const server = new ws.Server({ port: 8080 })
@@ -33,7 +33,7 @@ test('basic', async (t) => {
   })
 })
 
-test('secure', async (t) => {
+test('secure', (t) => {
   t.plan(3)
 
   const server = new ws.Server({ port: 8080, secure: true, ...options })
@@ -59,7 +59,7 @@ test('secure', async (t) => {
   })
 })
 
-test('ping pong', async (t) => {
+test('ping pong', (t) => {
   t.plan(4)
 
   const server = new ws.Server({ port: 8080 })
@@ -95,7 +95,7 @@ test('connection refused', (t) => {
   client.on('error', (err) => t.ok(err))
 })
 
-test('large write', async (t) => {
+test('large write', (t) => {
   t.plan(3)
 
   const server = new ws.Server({ port: 8080 })
