@@ -53,7 +53,7 @@ test('secure', async (t) => {
   server.on('listening', () => {
     t.pass('listening')
 
-    const client = new ws.Socket({ port: 8080, secure: true })
+    const client = new ws.Socket({ port: 8080, secure: true, rejectUnauthorized: false })
 
     client.end('hello')
   })
