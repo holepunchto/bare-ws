@@ -12,6 +12,7 @@ interface WebSocketServerOptions extends HTTPServerConnectionOptions, HTTPSServe
 }
 
 interface WebSocketServerEvents extends DuplexEvents {
+  /** Emitted with the new `WebSocket` and the originating request after a successful handshake. */
   connection: [socket: WebSocket, req: HTTPClientRequest]
   listening: []
 }
@@ -21,9 +22,16 @@ interface WebSocketServer<
 > extends EventEmitter<M> {
   readonly listening: boolean
 
+  /** Return the bound address of the underlying TCP server. */
   address(): TCPSocketAddress
+  /**
+   * Stop the server from accepting new connections, calling `cb` once it has closed.
+   * @param cb - Called once the underlying server has closed.
+   */
   close(cb?: (err?: Error | null) => void): this
+  /** Ref the underlying server so it keeps the event loop alive. */
   ref(): this
+  /** Unref the underlying server so it does not keep the event loop alive on its own. */
   unref(): this
 }
 
