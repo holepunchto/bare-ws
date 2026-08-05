@@ -5,16 +5,29 @@ import URL from 'bare-url'
 import WebSocketError from './errors'
 
 interface WebSocketOptions {
+  /** The host to connect to. */
   host?: string
+  /** Alias for `host`, accepted for Node.js compatibility. */
   hostname?: string
+  /** The request path used in the handshake. */
   path?: string
+  /** The port to connect to. */
   port?: string | number
   secure?: boolean
+  /** An already-connected TCP socket to use instead of opening a new connection. */
   socket?: TCPSocket
 }
 
 interface WebSocketEvents extends DuplexEvents {
+  /**
+   * @param data - The payload of the ping frame; a string is converted to a `Buffer`.
+   * @throws {NOT_CONNECTED} the socket has not finished connecting.
+   */
   ping: [payload: unknown]
+  /**
+   * @param data - The payload of the pong frame; a string is converted to a `Buffer`.
+   * @throws {NOT_CONNECTED} the socket has not finished connecting.
+   */
   pong: [payload: unknown]
 }
 

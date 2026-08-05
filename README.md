@@ -24,6 +24,10 @@ server.on('listening', () => {
 })
 ```
 
+## API
+
+See the [`bare-ws` reference](https://docs.pears.com/reference/bare/modules/bare-ws).
+
 ## License
 
 Apache-2.0
