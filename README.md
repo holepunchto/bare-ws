@@ -24,10 +24,12 @@ server.on('listening', () => {
 })
 ```
 
-## License
-
-Apache-2.0
-
+<!--
+  The API section below is generated from this module's shipped `.d.ts` by
+  bare-refgen (holepunchto/pear-docs, scripts/bare-refgen; see
+  holepunchto/pear-docs#326). Regenerate with `npm run emit:ts-doc` in that
+  repo rather than editing by hand.
+-->
 <!-- bare-refgen:api start -->
 
 ## API
@@ -547,3 +549,7 @@ A frame was received with the reserved RSV3 bit set.
 **Returns** `WebSocketError` — A `WebSocketError` with `code` set to `'UNEXPECTED_RSV3'`, for the caller to throw.
 
 <!-- bare-refgen:api end -->
+
+## License
+
+Apache-2.0
