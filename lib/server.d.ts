@@ -11,7 +11,15 @@ interface WebSocketServerOptions
   extends
     HTTPServerConnectionOptions,
     HTTPSServerConnectionOptions,
-    Pick<WebSocketOptions, 'maxPayload' | 'maxFragments' | 'maxBufferedChunks' | 'idleTimeout'> {
+    Pick<
+      WebSocketOptions,
+      | 'maxPayload'
+      | 'maxFragments'
+      | 'maxBufferedChunks'
+      | 'minBufferedChunks'
+      | 'minChunkAverage'
+      | 'idleTimeout'
+    > {
   secure?: boolean
 
   /**

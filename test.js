@@ -2311,6 +2311,72 @@ test('a frame trickled out in too many chunks is refused', async (t) => {
   await new Promise((resolve) => server.close(resolve))
 })
 
+test('a frame trickled out in chunks too small to have earned them is refused', async (t) => {
+  t.plan(1)
+
+  const p = nextPort()
+  // The grace is spent by the first 8 chunks, after which each further one is
+  // earned by 64 bytes that never arrive.
+  const server = serve(p, {
+    minBufferedChunks: 8,
+    minChunkAverage: 64,
+    maxBufferedChunks: -1
+  })
+
+  const failed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('error', resolve))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), async (status, socket) => {
+    socket.write(frame(0x2, Buffer.alloc(0), { length: 1024 }).subarray(0, 8))
+
+    for (let i = 0; i < 128 && !socket.destroyed; i++) {
+      socket.write(Buffer.from([0x61]))
+
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  })
+
+  t.is((await failed).code, 'CHUNKS_TOO_SMALL', 'the parts held on to had to be paid for')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a frame arriving in chunks that carry their keep is not refused', async (t) => {
+  t.plan(1)
+
+  const p = nextPort()
+  const server = serve(p, { minBufferedChunks: 8, minChunkAverage: 64 })
+
+  const message = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('data', resolve))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  // Chunks of exactly the average asked for, well past the grace, so the
+  // allowance a peer earns has to keep pace with what it sends.
+  const payload = Buffer.alloc(64 * 256, 0x61)
+
+  const peer = raw(p, upgrade(p), async (status, socket) => {
+    socket.write(frame(0x2, Buffer.alloc(0), { length: payload.byteLength }).subarray(0, 8))
+
+    for (let i = 0; i < 256 && !socket.destroyed; i++) {
+      socket.write(payload.subarray(i * 64, (i + 1) * 64))
+
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  })
+
+  t.alike(await message, payload, 'the message came through')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
 test('a frame that takes longer than the idle timeout to arrive is not dropped', async (t) => {
   t.plan(2)
 

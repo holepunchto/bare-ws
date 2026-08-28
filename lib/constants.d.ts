@@ -52,6 +52,10 @@ export const MAX_PAYLOAD_LENGTH: number
 export const MAX_FRAGMENTS: number
 /** The default `maxBufferedChunks`. */
 export const MAX_BUFFERED_CHUNKS: number
+/** The default `minChunkAverage`, in bytes. */
+export const MIN_CHUNK_AVERAGE: number
+/** The default `minBufferedChunks`. */
+export const MIN_BUFFERED_CHUNKS: number
 /** The default `handshakeTimeout`, in milliseconds. */
 export const HANDSHAKE_TIMEOUT: number
 /** The default `idleTimeout`, in milliseconds. */

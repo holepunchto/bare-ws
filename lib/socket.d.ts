@@ -39,9 +39,31 @@ interface WebSocketOptions {
    * incomplete. Bounded apart from `maxPayload`, which counts only the bytes a
    * chunk carries and not what holding on to the chunk itself costs, so a peer
    * that trickles its writes out could otherwise pile up parts indefinitely.
-   * Defaults to 262144; -1 removes the limit.
+   * A chunk held on to costs on the order of a kilobyte whatever it carries,
+   * so this is what bounds that cost rather than `maxPayload`. Defaults to
+   * 65536, which covers a frame the size of the default `maxPayload` arriving
+   * one segment at a time; -1 removes the limit.
    */
   maxBufferedChunks?: number
+
+  /**
+   * The chunks a frame may be buffered from before `minChunkAverage` is held
+   * against the peer, so that a frame too small for what holding it costs to
+   * matter is never judged on it. Defaults to 4096.
+   */
+  minBufferedChunks?: number
+
+  /**
+   * The bytes each chunk a frame is buffered from must carry on average, once
+   * more than `minBufferedChunks` of them are held. What a chunk costs to hold
+   * does not depend on what it carries, so this is what bounds that cost
+   * against the payload rather than against a count: past the grace, every
+   * further chunk is earned by this many bytes. A peer that trickles its writes
+   * out is refused early however large the frame it claimed, while one whose
+   * frame arrives in ordinary reads never comes near it. Defaults to 256; -1
+   * removes the requirement.
+   */
+  minChunkAverage?: number
 
   /**
    * How long a client waits for a server to answer its handshake, in
@@ -62,8 +84,8 @@ interface WebSocketOptions {
    * This measures silence rather than progress. A peer part way through a
    * frame refreshes the budget with every byte it sends, so one that trickles
    * them out holds on to everything it has sent for as long as it keeps
-   * sending; what that costs is bounded by `maxPayload` and
-   * `maxBufferedChunks` rather than by time. Liveness beyond this, such as
+   * sending; what that costs is bounded by `maxPayload`, `maxBufferedChunks`
+   * and `minChunkAverage` rather than by time. Liveness beyond this, such as
    * requiring the peer to answer every ping or to finish what it started
    * within some deadline, is left to the application, since only it knows how
    * long its own messages may take to arrive.

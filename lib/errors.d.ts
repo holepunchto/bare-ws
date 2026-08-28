@@ -172,6 +172,12 @@ declare class WebSocketError extends Error {
    */
   static TOO_MANY_CHUNKS(msg?: string): WebSocketError
   /**
+   * A frame was still incomplete after being buffered from more chunks than the bytes it carries earn at `minChunkAverage`.
+   * @param msg - The error message.
+   * @returns A `WebSocketError` with `code` set to `'CHUNKS_TOO_SMALL'`, for the caller to throw.
+   */
+  static CHUNKS_TOO_SMALL(msg?: string): WebSocketError
+  /**
    * A text frame or close reason was not well-formed UTF-8.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'INVALID_UTF8'`, for the caller to throw.
