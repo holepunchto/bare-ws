@@ -4,7 +4,7 @@ const net = require('bare-tcp')
 const crypto = require('bare-crypto')
 const ws = require('.')
 const Frame = require('./lib/frame')
-const { GUID } = require('./lib/constants')
+const { GUID, EOL, EOF } = require('./lib/constants')
 const isValidUTF8 = require('./lib/utf8')
 
 const options = {
@@ -2489,4 +2489,273 @@ test('a subprotocol the client offered is accepted', async (t) => {
 
     await new Promise((resolve) => server.close(resolve))
   }
+})
+
+test('a peer that answers without upgrading is reported, not waited on', async (t) => {
+  t.plan(2)
+
+  // The server's own refusal, which is answered 403 rather than upgraded.
+  {
+    const p = nextPort()
+    const server = serve(p, { verifyClient: () => false })
+
+    server.on('handshakeError', () => {})
+
+    await new Promise((resolve) => server.on('listening', resolve))
+
+    const client = new ws.Socket({ port: p })
+
+    const err = await settles(client)
+
+    t.is(err && err.code, 'INVALID_UPGRADE_STATUS', 'a refused handshake')
+
+    client.destroy()
+
+    await new Promise((resolve) => server.close(resolve))
+  }
+
+  // A peer that never speaks the protocol at all.
+  {
+    const p = nextPort()
+    const server = rawServer((socket) =>
+      socket.once('data', () => socket.write('HTTP/1.1 200 OK' + EOL + 'Content-Length: 0' + EOF))
+    )
+
+    await new Promise((resolve) => server.listen(p, resolve))
+
+    const client = new ws.Socket({ port: p })
+
+    const err = await settles(client)
+
+    t.is(err && err.code, 'INVALID_UPGRADE_STATUS', 'a plain response')
+
+    client.destroy()
+
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+// Resolves with the error the socket fails with, or null if it just sits there.
+function settles(socket, timeout = 3000) {
+  return Promise.race([
+    new Promise((resolve) => socket.on('error', resolve)),
+    new Promise((resolve) => setTimeout(() => resolve(null), timeout))
+  ])
+}
+
+test('a reserved opcode is refused on the frame that carries it', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const failed = new Promise((resolve) => {
+    server.on('connection', (socket) => {
+      socket.on('error', (err) => resolve({ err, buffered: socket._fragmented }))
+    })
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  // Unfinished, so nothing but the opcode itself says the message is no good.
+  const peer = raw(p, upgrade(p), (status, socket) =>
+    socket.write(frame(0x3, Buffer.alloc(4096), { fin: false }))
+  )
+
+  const { err, buffered } = await failed
+
+  t.is(err.code, 'INVALID_OPCODE', 'refused')
+  t.is(buffered, 0, 'nothing was buffered for it')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a negative bound removes the fragment limit', async (t) => {
+  t.plan(1)
+
+  const { client, socket, close } = await pair({ server: { maxFragments: -1 } })
+
+  const read = message(socket)
+
+  const mask = Buffer.alloc(4)
+
+  client._socket.write(new Frame(0x1, Buffer.from('a'), { fin: false, mask }).toBuffer())
+  client._socket.write(new Frame(0x0, Buffer.from('b'), { fin: false, mask }).toBuffer())
+  client._socket.write(new Frame(0x0, Buffer.from('c'), { mask }).toBuffer())
+
+  t.alike(await read, Buffer.from('abc'), 'assembled without a limit to hit')
+
+  await close()
+})
+
+test('a connection lost without a close frame is told apart from a clean one', async (t) => {
+  t.plan(6)
+
+  for (const mode of ['clean', 'abrupt']) {
+    const { client, socket, server } = await pair()
+
+    socket.on('error', () => {})
+
+    const failed = new Promise((resolve) => client.on('error', resolve))
+    const closed = closes(client)
+
+    if (mode === 'clean') socket.end()
+    else socket._socket.destroy()
+
+    const err = await Promise.race([failed, closed.then(() => null)])
+
+    if (mode === 'clean') {
+      t.is(err, null, 'a clean close is not an error')
+      t.is(client.closeCode, 1000, 'closed normally')
+      t.is(client.closeReason.byteLength, 0, 'with no reason')
+    } else {
+      t.is(err && err.code, 'UNEXPECTED_CLOSE', 'a lost connection is an error')
+      t.is(client.closeCode, 1006, 'reported as an abnormal closure')
+      t.is(client.closeReason.byteLength, 0, 'with no reason')
+    }
+
+    client.destroy()
+    socket.destroy()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('the status and reason a peer closes with are echoed and reported', async (t) => {
+  t.plan(4)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const closed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('close', () => resolve(socket)))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const answer = new Promise((resolve) => {
+    const peer = raw(p, upgrade(p), (status, socket) => {
+      socket.write(frame(0x8, Buffer.concat([Buffer.from([0x03, 0xe9]), Buffer.from('bye now')])))
+      socket.once('data', resolve)
+    })
+
+    peer.on('close', () => {})
+  })
+
+  const reply = await answer
+  const socket = await closed
+
+  t.is(socket.closeCode, 1001, 'the status was reported')
+  t.alike(socket.closeReason, Buffer.from('bye now'), 'so was the reason')
+  t.is(reply.readUInt16BE(2), 1001, 'the status went back')
+  t.alike(reply.subarray(4), Buffer.from('bye now'), 'so did the reason')
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a close frame carrying no status is answered with none', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const closed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('close', () => resolve(socket)))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const answer = new Promise((resolve) => {
+    raw(p, upgrade(p), (status, socket) => {
+      socket.write(frame(0x8))
+      socket.once('data', resolve)
+    })
+  })
+
+  const reply = await answer
+  const socket = await closed
+
+  // 1005 stands for the absence of a status and may never go on the wire.
+  t.is(socket.closeCode, 1005, 'reported as no status received')
+  t.is(reply.byteLength, 2, 'answered with an empty close frame')
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a buffered chunk is not left pinning the read buffer it came in', async (t) => {
+  t.plan(2)
+
+  const { client, socket, close } = await pair()
+
+  // A header promising far more than the trickle that follows, so the chunks
+  // pile up unparsed.
+  client._socket.write(Buffer.from([0x82, 0x7e, 0xff, 0xff]))
+
+  for (let i = 0; i < 64; i++) {
+    client._socket.write(Buffer.from([0x41]))
+    await new Promise((resolve) => setTimeout(resolve, 1))
+  }
+
+  const pinned = new Set(socket._buffer.map((chunk) => chunk.buffer))
+
+  let bytes = 0
+
+  for (const buffer of pinned) bytes += buffer.byteLength
+
+  t.ok(socket._buffer.length > 1, `${socket._buffer.length} chunks are being held`)
+  t.is(bytes, socket._buffered, 'holding on to no more than they carry')
+
+  await close()
+})
+
+test('an upgrade handed over with the wrong status is refused', (t) => {
+  t.plan(1)
+
+  // Which of `upgrade` and `response` a non-101 arrives on is the HTTP client's
+  // to decide, so the status is checked on both paths.
+  const listeners = {}
+
+  const req = {
+    headers: {},
+    on(name, fn) {
+      listeners[name] = fn
+      return this
+    },
+    end() {
+      listeners.upgrade({ statusCode: 200, headers: {}, on() {} })
+    }
+  }
+
+  ws.Socket.handshake(req, (err) => {
+    t.is(err && err.code, 'INVALID_UPGRADE_STATUS', 'refused on the upgrade path too')
+  })
+})
+
+test('a close frame carrying a status but no reason is echoed as it came', async (t) => {
+  t.plan(3)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const closed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('close', () => resolve(socket)))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const answer = new Promise((resolve) => {
+    raw(p, upgrade(p), (status, socket) => {
+      socket.write(frame(0x8, Buffer.from([0x03, 0xf1])))
+      socket.once('data', resolve)
+    })
+  })
+
+  const reply = await answer
+  const socket = await closed
+
+  t.is(socket.closeCode, 1009, 'the status was reported')
+  t.is(socket.closeReason.byteLength, 0, 'with no reason alongside it')
+  t.alike(reply.subarray(2), Buffer.from([0x03, 0xf1]), 'the status went back on its own')
+
+  await new Promise((resolve) => server.close(resolve))
 })

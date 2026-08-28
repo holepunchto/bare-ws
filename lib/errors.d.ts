@@ -190,6 +190,12 @@ declare class WebSocketError extends Error {
    */
   static INVALID_CLOSE_STATUS(msg?: string): WebSocketError
   /**
+   * The connection went away before a close frame had been exchanged, so part of a message may have been lost.
+   * @param msg - The error message.
+   * @returns A `WebSocketError` with `code` set to `'UNEXPECTED_CLOSE'`, for the caller to throw.
+   */
+  static UNEXPECTED_CLOSE(msg?: string): WebSocketError
+  /**
    * No byte arrived from the peer within `idleTimeout`, and it did not answer the ping that followed.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'CONNECTION_TIMEOUT'`, for the caller to throw.

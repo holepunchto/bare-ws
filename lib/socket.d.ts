@@ -29,7 +29,7 @@ interface WebSocketOptions {
   /**
    * The most fragments a single message may be assembled from. Bounded apart
    * from `maxPayload` because an empty fragment costs a peer almost nothing.
-   * Defaults to 1024.
+   * Defaults to 1024; -1 removes the limit.
    */
   maxFragments?: number
 
@@ -61,6 +61,20 @@ interface WebSocketEvents extends DuplexEvents {
 }
 
 interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<M> {
+  /**
+   * The status the peer closed with, once it has sent a close frame. `1005` if
+   * the close frame carried no status, and `1006` until one arrives at all, so
+   * a connection that went away without closing keeps it. Readable from a
+   * `close` listener.
+   */
+  readonly closeCode: number
+
+  /**
+   * The reason the peer closed with, empty unless its close frame carried one
+   * past the status. Readable from a `close` listener.
+   */
+  readonly closeReason: Buffer
+
   /**
    * Send a ping frame to the peer.
    * @param data - The payload of the ping frame, at most 125 bytes; a string is converted to a `Buffer`.
