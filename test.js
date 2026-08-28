@@ -2759,3 +2759,203 @@ test('a close frame carrying a status but no reason is echoed as it came', async
 
   await new Promise((resolve) => server.close(resolve))
 })
+
+test('a protocol error after our close frame does not send a second one', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const failed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('error', resolve).on('data', () => {}))
+  })
+
+  server.on('connection', (socket) => socket.on('data', () => socket.end()))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  let sent = Buffer.alloc(0)
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.on('data', (data) => {
+      sent = Buffer.concat([sent, data])
+    })
+
+    // Provokes the close frame, then a reserved opcode once it is out.
+    socket.write(frame(0x1, Buffer.from('go')))
+
+    setTimeout(() => socket.write(frame(0x3, Buffer.from('x'))), 50)
+  })
+
+  t.is((await failed).code, 'INVALID_OPCODE')
+
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  t.alike(
+    sent,
+    frame(0x8, Buffer.from([0x03, 0xe8]), { mask: false }),
+    'only our own close frame went out'
+  )
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a ping arriving after our close frame goes unanswered', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const pinged = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('ping', resolve).on('data', () => {}))
+  })
+
+  server.on('connection', (socket) => socket.on('data', () => socket.end()))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  let sent = Buffer.alloc(0)
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.on('data', (data) => {
+      sent = Buffer.concat([sent, data])
+    })
+
+    // Provokes the close frame, then a ping once it is out.
+    socket.write(frame(0x1, Buffer.from('go')))
+
+    setTimeout(() => socket.write(frame(0x9, Buffer.from('hello'))), 50)
+  })
+
+  t.alike(await pinged, Buffer.from('hello'), 'the application still hears the ping')
+
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  t.alike(
+    sent,
+    frame(0x8, Buffer.from([0x03, 0xe8]), { mask: false }),
+    'no pong followed the close frame'
+  )
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('ping and pong are refused once the socket has been ended', async (t) => {
+  t.plan(2)
+
+  const { client, close } = await pair()
+
+  client.end()
+
+  await new Promise((resolve) => client.once('finish', resolve))
+
+  t.exception(() => client.ping(), /NOT_CONNECTED/, 'ping')
+  t.exception(() => client.pong(), /NOT_CONNECTED/, 'pong')
+
+  await close()
+})
+
+test('a fragment that would carry the message past maxPayload is refused on its header', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = new ws.Server({ port: p, maxPayload: 1024 })
+
+  const failed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('error', resolve))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  let sent = 0
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    // 1000 bytes of the budget spent, then a header promising 64 MiB more and
+    // not a byte of it.
+    socket.write(frame(0x2, Buffer.alloc(1000), { fin: false }))
+
+    const header = frame(0x0, Buffer.alloc(0), { length: 64 * 1024 * 1024 })
+    sent = header.byteLength
+    socket.write(header)
+  })
+
+  t.is((await failed).code, 'MESSAGE_TOO_LARGE')
+  t.is(sent, 14, 'refused on the header, before any of the payload was buffered')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a control frame is not counted against what the message has left', async (t) => {
+  t.plan(1)
+
+  const p = nextPort()
+  const server = new ws.Server({ port: p, maxPayload: 1024 })
+
+  const ponged = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('ping', resolve).on('error', () => {}))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    // All but eight bytes of the budget spent, then a 125 byte control frame,
+    // which is bounded by its own limit and no part of the message.
+    socket.write(frame(0x2, Buffer.alloc(1016), { fin: false }))
+    socket.write(frame(0x9, Buffer.alloc(125, 0x61)))
+  })
+
+  t.alike(await ponged, Buffer.alloc(125, 0x61), 'the ping came through')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('an upgrade handed over without an Upgrade header is refused', (t) => {
+  t.plan(1)
+
+  const listeners = {}
+
+  const req = {
+    headers: {},
+    on(name, fn) {
+      listeners[name] = fn
+      return this
+    },
+    end() {
+      listeners.upgrade({ statusCode: 101, headers: {}, on() {} })
+    }
+  }
+
+  ws.Socket.handshake(req, (err) => {
+    t.is(err && err.code, 'INVALID_UPGRADE_HEADER', 'a missing header is not dereferenced')
+  })
+})
+
+test('a peer that half-closes without a close frame is not waited on', async (t) => {
+  t.plan(2)
+
+  // With the idle timeout off nothing else can rescue this, so the half-close
+  // has to be noticed on its own.
+  const { client, socket, close } = await pair({
+    server: { idleTimeout: 0 },
+    client: { idleTimeout: 0 }
+  })
+
+  socket.on('error', () => {})
+
+  const failed = new Promise((resolve) => client.on('error', resolve))
+
+  // A `FIN` and nothing else, which leaves that end writable so the socket
+  // never closes of its own accord.
+  socket._socket.end()
+
+  const err = await failed
+
+  t.is(err.code, 'UNEXPECTED_CLOSE', 'the lost connection was noticed')
+  t.is(client.closeCode, 1006, 'reported as an abnormal closure')
+
+  await close()
+})

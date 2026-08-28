@@ -19,10 +19,11 @@ interface WebSocketOptions {
   socket?: TCPSocket
 
   /**
-   * The largest message accepted, in bytes. A frame whose header declares more
-   * is refused before its payload is buffered. Reading one costs up to twice
-   * this while it is reassembled and copied out. Defaults to 100 MiB; -1
-   * removes the limit.
+   * The largest message accepted, in bytes, counted across every fragment it
+   * is assembled from. A frame whose header declares more than the message has
+   * left is refused before any of its payload is buffered. Reading a message
+   * costs up to three times this while its fragments are held, copied out and
+   * joined. Defaults to 100 MiB; -1 removes the limit.
    */
   maxPayload?: number
 
@@ -45,16 +46,22 @@ interface WebSocketOptions {
   /**
    * How long the connection may go without a byte from the peer before it is
    * dropped, in milliseconds. A ping goes out at half this interval, so an
-   * idle but responsive peer is kept. Liveness beyond this, such as requiring
-   * the peer to answer every ping, is left to the application, since only it
-   * knows how long its own messages may take to arrive. Defaults to 120000; 0
-   * disables it.
+   * idle but responsive peer is kept. Defaults to 120000; 0 disables it.
+   *
+   * This measures silence rather than progress. A peer part way through a
+   * frame refreshes the budget with every byte it sends, so one that trickles
+   * them out holds on to everything it has sent for as long as it keeps
+   * sending; what that costs is bounded by `maxPayload` and
+   * `maxBufferedChunks` rather than by time. Liveness beyond this, such as
+   * requiring the peer to answer every ping or to finish what it started
+   * within some deadline, is left to the application, since only it knows how
+   * long its own messages may take to arrive.
    */
   idleTimeout?: number
 }
 
 interface WebSocketEvents extends DuplexEvents {
-  /** Emitted with the payload of a ping frame received from the peer, which is answered with a pong automatically. */
+  /** Emitted with the payload of a ping frame received from the peer, which is answered with a pong automatically unless this side has already sent its close frame. */
   ping: [payload: Buffer]
   /** Emitted with the payload of a pong frame received from the peer. */
   pong: [payload: Buffer]
@@ -78,7 +85,7 @@ interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<
   /**
    * Send a ping frame to the peer.
    * @param data - The payload of the ping frame, at most 125 bytes; a string is converted to a `Buffer`.
-   * @throws {NOT_CONNECTED} the socket has not finished connecting, or has closed.
+   * @throws {NOT_CONNECTED} the socket has not finished connecting, has closed, or has been ended, since nothing may follow the close frame that ending sends.
    * @throws {INVALID_CONTROL_PAYLOAD_LENGTH} `data` is longer than 125 bytes.
    * @throws {TypeError} `data` is neither a string nor a view of bytes.
    */
@@ -86,7 +93,7 @@ interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<
   /**
    * Send a pong frame to the peer.
    * @param data - The payload of the pong frame, at most 125 bytes; a string is converted to a `Buffer`.
-   * @throws {NOT_CONNECTED} the socket has not finished connecting, or has closed.
+   * @throws {NOT_CONNECTED} the socket has not finished connecting, has closed, or has been ended, since nothing may follow the close frame that ending sends.
    * @throws {INVALID_CONTROL_PAYLOAD_LENGTH} `data` is longer than 125 bytes.
    * @throws {TypeError} `data` is neither a string nor a view of bytes.
    */
