@@ -3160,3 +3160,234 @@ test('a server that accepts the connection and then says nothing is not waited o
 
   await new Promise((resolve) => server.close(resolve))
 })
+
+test('an IPv6 URL is connected to without its brackets', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p, { host: '::1' })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const client = new ws.Socket(`ws://[::1]:${p}/`)
+
+  const opened = new Promise((resolve, reject) =>
+    client.on('open', () => resolve(true)).on('error', reject)
+  )
+
+  t.ok(await opened, 'connected to the literal')
+  t.is(client._socket.remoteAddress, '::1', 'connected to the address the URL named')
+
+  client.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a scheme the connection cannot be opened for is refused', (t) => {
+  const opened = ['ws://localhost/', 'wss://localhost/', 'http://localhost/', 'https://localhost/']
+
+  t.plan(opened.length + 4)
+
+  for (const url of opened) {
+    t.execution(() => {
+      const client = new ws.Socket(url, { handshakeTimeout: 0 })
+
+      client.on('error', () => {})
+      client.destroy()
+    }, `${url} is opened`)
+  }
+
+  for (const url of ['ftp://localhost/', 'file:///tmp', 'nope://localhost/']) {
+    try {
+      const client = new ws.Socket(url)
+
+      client.destroy()
+
+      t.fail(`${url} should have been refused`)
+    } catch (err) {
+      t.is(err.code, 'INVALID_PROTOCOL', `${url} is refused`)
+    }
+  }
+
+  // Options given without a URL name no scheme, so there is none to judge.
+  t.execution(() => {
+    const client = new ws.Socket({ port: nextPort(), handshakeTimeout: 0 })
+
+    client.on('error', () => {})
+    client.destroy()
+  }, 'options carry no scheme to refuse')
+})
+
+test('what the server underneath reports reaches the one the caller holds', async (t) => {
+  t.plan(3)
+
+  const p = nextPort()
+  const first = serve(p)
+
+  await new Promise((resolve) => first.on('listening', resolve))
+
+  const second = serve(p)
+
+  const err = await new Promise((resolve) => second.on('error', resolve))
+
+  t.is(err.code, 'EADDRINUSE', 'the failure to bind was catchable')
+
+  const closed = new Promise((resolve) => first.on('close', resolve))
+
+  first.close(() => t.pass('closed'))
+
+  await closed
+
+  t.pass('the close reached the caller')
+})
+
+test('a handshake that never finishes is given up on', async (t) => {
+  t.plan(4)
+
+  const p = nextPort()
+
+  // Never settles, so nothing but the deadline can end the handshake.
+  const server = new ws.Server({
+    port: p,
+    handshakeTimeout: 100,
+    verifyClient: () => new Promise(() => {})
+  })
+
+  const reported = new Promise((resolve) => server.on('handshakeError', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const answered = new Promise((resolve) => {
+    raw(p, upgrade(p), (status) => resolve(status))
+  })
+
+  t.is(await answered, 408, 'answered 408')
+  t.is((await reported).code, 'CONNECTION_TIMEOUT', 'reported as a timeout')
+  t.is(server._handshakes.size, 0, 'nothing was left mid-handshake')
+  t.is(server.connections.size, 0, 'nothing was handed over')
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a handshakeTimeout of 0 removes the bound on the server too', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+
+  const server = new ws.Server({
+    port: p,
+    handshakeTimeout: 0,
+    verifyClient: () => new Promise(() => {})
+  })
+
+  server.on('handshakeError', () => t.fail('should not have been given up on'))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const socket = raw(p, upgrade(p), () => t.fail('should not have been answered'))
+
+  await new Promise((resolve) => setTimeout(resolve, 300))
+
+  t.is(server._handshakes.size, 1, 'still waiting on the handshake')
+
+  socket.destroy()
+
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  t.is(server._handshakes.size, 0, 'let go of once the peer went away')
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a verifyClient that resolves after the deadline is answered only once', async (t) => {
+  t.plan(3)
+
+  const p = nextPort()
+
+  let admit
+  const verifying = new Promise((resolve) => {
+    admit = resolve
+  })
+
+  const server = new ws.Server({
+    port: p,
+    handshakeTimeout: 100,
+    verifyClient: () => verifying
+  })
+
+  server.on('connection', () => t.fail('should not have upgraded'))
+
+  const errors = []
+  server.on('handshakeError', (err) => errors.push(err.code))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const responses = []
+
+  const socket = raw(p, upgrade(p), (status) => responses.push(status))
+
+  await new Promise((resolve) => setTimeout(resolve, 250))
+
+  admit(true)
+
+  await new Promise((resolve) => setTimeout(resolve, 150))
+
+  t.alike(responses, [408], 'answered once')
+  t.alike(errors, ['CONNECTION_TIMEOUT'], 'reported once')
+  t.is(server.connections.size, 0, 'nothing was handed over')
+
+  socket.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('how long a peer has to answer a close frame is configurable', async (t) => {
+  t.plan(2)
+
+  // A peer that reads nothing back never answers the close frame it is owed.
+  const { client, close } = await pair({ client: { closeTimeout: 100 } })
+
+  client.on('error', () => {})
+  client._socket.pause()
+
+  const closed = closes(client, 1000)
+
+  client.end()
+
+  t.ok(await closed, 'dropped once its time was up')
+
+  await close()
+
+  const patient = await pair({ client: { closeTimeout: 0, idleTimeout: 0 } })
+
+  patient.client.on('error', () => {})
+  patient.client._socket.pause()
+  patient.client.end()
+
+  t.absent(await closes(patient.client, 300), 'a closeTimeout of 0 removes the bound')
+
+  await patient.close()
+})
+
+test('data that arrives while the socket is being torn down is not parsed', async (t) => {
+  t.plan(3)
+
+  const { client, socket, close } = await pair()
+
+  client.on('error', () => {})
+
+  client.destroy()
+
+  // `destroy` only marks the stream; the socket is not let go of until the
+  // teardown runs, so anything already on its way still arrives here.
+  t.ok(client._socket !== null, 'the socket was still attached')
+
+  client._socket.emit('data', frame(0x2, Buffer.from('hello'), { mask: false }))
+
+  t.is(client._buffered, 0, 'nothing was buffered')
+  t.is(client._buffer.length, 0, 'nothing was held on to')
+
+  socket.on('error', () => {})
+
+  await close()
+})

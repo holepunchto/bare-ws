@@ -28,6 +28,12 @@ declare class WebSocketError extends Error {
    */
   static NOT_CONNECTED(msg?: string): WebSocketError
   /**
+   * A URL was given with a scheme other than `ws:`, `wss:`, `http:` or `https:`.
+   * @param msg - The error message.
+   * @returns A `WebSocketError` with `code` set to `'INVALID_PROTOCOL'`, for the caller to throw.
+   */
+  static INVALID_PROTOCOL(msg?: string): WebSocketError
+  /**
    * A frame was received with the reserved RSV1 bit set.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'UNEXPECTED_RSV1'`, for the caller to throw.

@@ -19,6 +19,14 @@ interface WebSocketOptions {
   socket?: TCPSocket
 
   /**
+   * Whether this side of the connection is the server, which masks no frame it
+   * sends and requires every frame it receives to be masked. Set for you by
+   * `WebSocketServer`; pass it alongside `socket` when adopting a connection
+   * this side accepted itself. Defaults to `false`.
+   */
+  isServer?: boolean
+
+  /**
    * The largest message accepted, in bytes, counted across every fragment it
    * is assembled from. A frame whose header declares more than the message has
    * left is refused before any of its payload is buffered. Reading a message
@@ -91,6 +99,15 @@ interface WebSocketOptions {
    * long its own messages may take to arrive.
    */
   idleTimeout?: number
+
+  /**
+   * How long the peer has to answer this side's close frame, in milliseconds,
+   * before the connection is dropped. Also the grace the socket is given to
+   * flush a close frame that has been queued, so that a peer which has stopped
+   * reading does not hold the connection open. Defaults to 5000; 0 removes the
+   * bound, leaving `idleTimeout` as the only backstop.
+   */
+  closeTimeout?: number
 }
 
 interface WebSocketHandshakeOptions {
