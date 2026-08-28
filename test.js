@@ -5,6 +5,7 @@ const crypto = require('bare-crypto')
 const ws = require('.')
 const Frame = require('./lib/frame')
 const { GUID } = require('./lib/constants')
+const isValidUTF8 = require('./lib/utf8')
 
 const options = {
   cert: fs.readFileSync('test/fixtures/cert.crt'),
@@ -1958,4 +1959,534 @@ test('ending a client that never connected is harmless', async (t) => {
   await new Promise((resolve) => client.on('close', resolve))
 
   t.pass('closed without throwing')
+})
+
+test('a write parked on backpressure is released when the socket is destroyed', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  // A peer that completes the handshake and then stops reading.
+  const peer = raw(p, upgrade(p), (status, socket) => socket.pause())
+
+  const socket = await connected
+
+  t.ok(await park(socket), 'a write is waiting on a drain that will not come')
+
+  socket.destroy(new Error('boom'))
+
+  t.ok(await closes(socket), 'the stream finished destroying')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a protocol failure with a write parked still tears the socket down', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), (status, socket) => socket.pause())
+
+  const socket = await connected
+
+  t.ok(await park(socket), 'a write is waiting on a drain that will not come')
+
+  // An unmasked frame, which a server must fail the connection over.
+  peer.write(frame(0x1, Buffer.from('abc'), { mask: false }))
+
+  t.ok(await closes(socket), 'the stream finished destroying')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a peer cannot pile up more than the read queue holds', async (t) => {
+  t.plan(3)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    // Nobody is reading on the other end, so this may only be taken as fast as
+    // the read queue is drained.
+    for (let i = 0; i < 32; i++) socket.write(frame(0x2, Buffer.alloc(1024 * 1024, 0x61)))
+  })
+
+  const socket = await connected
+
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+
+  t.ok(socket._paused, 'the socket was paused')
+  t.ok(
+    socket._readableState.buffered < 8 * 1024 * 1024,
+    `queued ${socket._readableState.buffered} bytes of the 32 MiB sent`
+  )
+
+  // Reading again lets the rest through rather than dropping it.
+  let received = 0
+
+  const done = new Promise((resolve) => {
+    socket.on('data', (data) => {
+      received += data.byteLength
+
+      if (received === 32 * 1024 * 1024) resolve()
+    })
+  })
+
+  await done
+
+  t.is(received, 32 * 1024 * 1024, 'every byte arrived once it was read')
+
+  peer.destroy()
+  socket.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a typed array that is not a buffer is sent as the bytes it holds', async (t) => {
+  t.plan(2)
+
+  const { client, socket, close } = await pair()
+
+  const first = new Promise((resolve) => socket.once('data', resolve))
+
+  client.write(new Uint8Array([1, 2, 3]))
+  t.alike(await first, Buffer.from([1, 2, 3]), 'a Uint8Array keeps its bytes')
+
+  const second = new Promise((resolve) => socket.once('data', resolve))
+
+  client.write(new Uint16Array([0x0201]))
+  t.alike(await second, Buffer.from([1, 2]), 'a wider view is sent as its bytes, not its elements')
+
+  await close()
+})
+
+test('a frame takes any view of bytes as its payload, options and all', (t) => {
+  t.plan(4)
+
+  const mask = Buffer.alloc(4)
+
+  const binary = new Frame(0x2, new Uint8Array([1, 2, 3]), { mask })
+
+  t.is(binary.payload.byteLength, 3, 'the payload survived')
+  t.is(binary.mask, mask, 'the options survived alongside it')
+
+  const wide = new Frame(0x2, new Uint16Array([1, 2, 3]))
+
+  t.is(wide.payload.byteLength, 6, 'a wider view is measured in bytes')
+
+  const options = new Frame(0x2, { fin: false })
+
+  t.is(options.fin, false, 'options may still stand in for a payload')
+})
+
+test('a tail left over from a large read does not pin the whole buffer', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.write(frame(0x2, Buffer.alloc(8 * 1024 * 1024, 0x61)))
+    // The first byte of a frame that never arrives, so the tail is held on to.
+    socket.write(Buffer.from([0x82]))
+  })
+
+  const socket = await connected
+
+  socket.on('data', () => {})
+
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+
+  t.is(socket._buffered, 1, 'a single byte is left over')
+  t.ok(
+    socket._buffer[0].buffer.byteLength < 8 * 1024 * 1024,
+    `it is backed by ${socket._buffer[0].buffer.byteLength} bytes, not the 8 MiB it arrived in`
+  )
+
+  peer.destroy()
+  socket.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a control frame payload is refused before it reaches the wire', async (t) => {
+  t.plan(4)
+
+  const { client, close } = await pair()
+
+  t.exception(
+    () => client.ping(Buffer.alloc(126)),
+    /INVALID_CONTROL_PAYLOAD_LENGTH/,
+    'a ping over 125 bytes'
+  )
+
+  t.exception(
+    () => client.pong(Buffer.alloc(126)),
+    /INVALID_CONTROL_PAYLOAD_LENGTH/,
+    'a pong over 125 bytes'
+  )
+
+  // `exception.all`, since brittle rethrows native errors from `exception`.
+  await t.exception.all(
+    () => client.ping(null),
+    /must be a string or a buffer/,
+    'a payload that is not bytes'
+  )
+
+  await t.exception.all(
+    () => client.ping(123),
+    /must be a string or a buffer/,
+    'a payload that is a number'
+  )
+
+  await close()
+})
+
+test('a ping carries a typed array that is not a buffer', async (t) => {
+  t.plan(1)
+
+  const { client, socket, close } = await pair()
+
+  const ponged = new Promise((resolve) => client.once('pong', resolve))
+
+  client.ping(new Uint8Array([1, 2, 3]))
+
+  t.alike(await ponged, Buffer.from([1, 2, 3]), 'the payload came back')
+
+  await socket.destroy()
+  await close()
+})
+
+test('ping and pong after the socket has closed', async (t) => {
+  t.plan(2)
+
+  const { client, close } = await pair()
+
+  client.destroy()
+
+  await new Promise((resolve) => client.on('close', resolve))
+
+  t.exception(() => client.ping(), /NOT_CONNECTED/, 'ping')
+  t.exception(() => client.pong(), /NOT_CONNECTED/, 'pong')
+
+  await close()
+})
+
+test('closing the server closes the connections it has open', async (t) => {
+  t.plan(4)
+
+  const { server, client, socket } = await pair()
+
+  t.is(server.connections.size, 1, 'the connection is tracked')
+  t.ok(server.connections.has(socket), 'it is the one that was handed out')
+
+  // Listened for before closing, or a client that goes first is missed.
+  const closed = new Promise((resolve) => client.on('close', resolve))
+
+  await new Promise((resolve) => server.close(resolve))
+
+  t.pass('the server closed')
+
+  await closed
+
+  t.is(server.connections.size, 0, 'the connection was let go of')
+})
+
+test('closing the server drops a peer that never answers its close frame', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  // A peer that takes the close frame and does nothing about it.
+  const peer = raw(p, upgrade(p), () => {})
+
+  const socket = await connected
+
+  const started = Date.now()
+
+  await new Promise((resolve) => server.close(resolve))
+
+  t.ok(Date.now() - started >= 1000, 'it was given time to close of its own accord')
+  t.ok(socket.destroyed, 'it was dropped once that time ran out')
+
+  peer.destroy()
+})
+
+test('a client refuses what it never put on the table', async (t) => {
+  const cases = [
+    [
+      'an extension it did not offer',
+      'Sec-WebSocket-Extensions: permessage-deflate\r\n',
+      'UNEXPECTED_EXTENSION'
+    ],
+    ['a subprotocol it did not offer', 'Sec-WebSocket-Protocol: chat\r\n', 'UNEXPECTED_PROTOCOL']
+  ]
+
+  t.plan(cases.length)
+
+  for (const [name, extra, code] of cases) {
+    const p = nextPort()
+
+    const server = rawServer((socket) => {
+      let head = ''
+
+      socket.on('data', (data) => {
+        head += data.toString()
+
+        if (!head.includes('\r\n\r\n')) return
+
+        const key = /sec-websocket-key: (.*)\r\n/i.exec(head)[1]
+        const accept = crypto.createHash('sha1').update(key).update(GUID).digest('base64')
+
+        socket.write(
+          'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n' +
+            `Sec-WebSocket-Accept: ${accept}\r\n` +
+            extra +
+            '\r\n'
+        )
+      })
+    })
+
+    await new Promise((resolve) => server.listen(p, resolve))
+
+    const client = new ws.Socket({ port: p })
+
+    t.is((await new Promise((resolve) => client.on('error', resolve))).code, code, name)
+
+    client.destroy()
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('a frame trickled out in too many chunks is refused', async (t) => {
+  t.plan(1)
+
+  const p = nextPort()
+  const server = serve(p, { maxBufferedChunks: 32 })
+
+  const failed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('error', resolve))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  // A header promising a payload that then arrives one byte per read, so the
+  // parts held on to grow without the bytes in them ever nearing `maxPayload`.
+  const peer = raw(p, upgrade(p), async (status, socket) => {
+    socket.write(frame(0x2, Buffer.alloc(0), { length: 1024 }).subarray(0, 8))
+
+    for (let i = 0; i < 128 && !socket.destroyed; i++) {
+      socket.write(Buffer.from([0x61]))
+
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+  })
+
+  t.is((await failed).code, 'TOO_MANY_CHUNKS', 'the parts held on to were bounded')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a frame that takes longer than the idle timeout to arrive is not dropped', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const payload = Buffer.alloc(4096, 0x61)
+
+  // Sent in pieces spread over several times the idle timeout, as a large
+  // message on a slow link arrives.
+  const server = serve(p, { idleTimeout: 300 })
+
+  const received = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('data', resolve))
+  })
+
+  const failed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('error', resolve))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), async (status, socket) => {
+    const whole = frame(0x2, payload)
+
+    for (let i = 0; i < whole.byteLength && !socket.destroyed; i += 256) {
+      socket.write(whole.subarray(i, i + 256))
+
+      await new Promise((resolve) => setTimeout(resolve, 60))
+    }
+  })
+
+  const outcome = await Promise.race([received, failed])
+
+  t.ok(Buffer.isBuffer(outcome), 'the message arrived rather than the connection failing')
+  t.alike(outcome, payload, 'every byte of it')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a handshake error is reported before the socket is torn down', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = new ws.Server({ port: p })
+
+  const reported = new Promise((resolve) => {
+    server.on('handshakeError', (err, socket) => resolve({ err, socket }))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(
+    p,
+    'GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: h2c\r\nConnection: Upgrade\r\n\r\n',
+    () => {}
+  )
+
+  const { err, socket } = await reported
+
+  t.is(err.code, 'INVALID_UPGRADE_HEADER', 'the failure was reported')
+  t.absent(socket.destroyed, 'the socket was still there to look at')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+// Writes until the socket pushes back and a write callback is left parked.
+async function park(socket) {
+  const data = Buffer.alloc(1024 * 1024, 0x61)
+
+  for (let i = 0; i < 128 && socket._pendingWrite === null; i++) {
+    socket.write(data)
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  return socket._pendingWrite !== null
+}
+
+// Whether the stream finishes destroying, rather than hanging on a callback
+// that never runs.
+function closes(socket, timeout = 5000) {
+  return Promise.race([
+    new Promise((resolve) => socket.on('close', () => resolve(true))),
+    new Promise((resolve) => setTimeout(() => resolve(false), timeout))
+  ])
+}
+
+test('every shape of UTF-8 sequence is judged on its own', (t) => {
+  const cases = [
+    ['', true, 'nothing at all'],
+    ['61', true, 'one byte'],
+    ['c3a9', true, 'two bytes'],
+    ['e282ac', true, 'three bytes'],
+    ['f09f9880', true, 'four bytes'],
+    ['80', false, 'a continuation byte on its own'],
+    ['bf', false, 'the last continuation byte on its own'],
+    ['f8', false, 'a lead byte no sequence starts with'],
+    ['ff', false, 'the byte no sequence may contain'],
+    ['e282', false, 'three bytes cut short'],
+    ['e28241', false, 'three bytes with the last one not a continuation'],
+    ['c0af', false, 'two bytes spent on what one would hold'],
+    ['e080af', false, 'three bytes spent on what one would hold'],
+    ['f0808080', false, 'four bytes spent on what one would hold'],
+    ['eda080', false, 'the first half of a surrogate pair'],
+    ['edbfbf', false, 'the second half of a surrogate pair'],
+    ['f4908080', false, 'a code point past the last plane'],
+    ['f48fbfbf', true, 'the last code point there is']
+  ]
+
+  t.plan(cases.length)
+
+  for (const [hex, valid, name] of cases) {
+    t.is(isValidUTF8(Buffer.from(hex, 'hex')), valid, name)
+  }
+})
+
+test('writing something that is not backed by bytes is refused', async (t) => {
+  t.plan(1)
+
+  const { client, close } = await pair()
+
+  const failed = new Promise((resolve) => client.on('error', resolve))
+
+  client.write(123)
+
+  t.is((await failed).code, 'INVALID_ENCODING', 'a number is not data')
+
+  await close()
+})
+
+test('a subprotocol the client offered is accepted', async (t) => {
+  const http = require('bare-http1')
+
+  const cases = [
+    ['chat', null, 'the one that was offered'],
+    ['superchat', null, 'another of the ones that were offered'],
+    ['something else', 'UNEXPECTED_PROTOCOL', 'one that was not']
+  ]
+
+  t.plan(cases.length)
+
+  for (const [answer, code, name] of cases) {
+    const p = nextPort()
+
+    const server = rawServer((socket) => {
+      let head = ''
+
+      socket.on('data', (data) => {
+        head += data.toString()
+
+        if (!head.includes('\r\n\r\n')) return
+
+        const key = /sec-websocket-key: (.*)\r\n/i.exec(head)[1]
+        const accept = crypto.createHash('sha1').update(key).update(GUID).digest('base64')
+
+        socket.write(
+          'HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n' +
+            `Sec-WebSocket-Accept: ${accept}\r\n` +
+            `Sec-WebSocket-Protocol: ${answer}\r\n\r\n`
+        )
+      })
+    })
+
+    await new Promise((resolve) => server.listen(p, resolve))
+
+    const req = http.request({ port: p, path: '/' })
+
+    req.setHeader('Sec-WebSocket-Protocol', 'chat, superchat')
+
+    const err = await new Promise((resolve) => ws.Socket.handshake(req, resolve))
+
+    t.is(err && err.code, code, name)
+
+    if (req.socket) req.socket.destroy()
+
+    await new Promise((resolve) => server.close(resolve))
+  }
 })

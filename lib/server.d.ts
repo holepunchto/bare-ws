@@ -11,7 +11,7 @@ interface WebSocketServerOptions
   extends
     HTTPServerConnectionOptions,
     HTTPSServerConnectionOptions,
-    Pick<WebSocketOptions, 'maxPayload' | 'maxFragments' | 'idleTimeout'> {
+    Pick<WebSocketOptions, 'maxPayload' | 'maxFragments' | 'maxBufferedChunks' | 'idleTimeout'> {
   secure?: boolean
 
   /**
@@ -35,10 +35,21 @@ interface WebSocketServer<
 > extends EventEmitter<M> {
   readonly listening: boolean
 
+  /**
+   * The connections the server has open. A socket handed over by an upgrade is
+   * no longer the underlying HTTP server's to close, so these are tracked here
+   * and closed by `close`.
+   */
+  readonly connections: Set<WebSocket>
+
   /** Return the bound address of the underlying TCP server. */
   address(): TCPSocketAddress
   /**
-   * Stop the server from accepting new connections, calling `cb` once it has closed.
+   * Stop the server from accepting new connections and close the ones it has
+   * open, calling `cb` once it has closed. Each connection is sent a close
+   * frame and dropped if it has not closed within five seconds, since
+   * otherwise a peer that stops taking part would keep the server from ever
+   * closing.
    * @param cb - Called once the underlying server has closed.
    */
   close(cb?: (err?: Error | null) => void): this

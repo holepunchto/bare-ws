@@ -22,7 +22,7 @@ declare class WebSocketError extends Error {
    */
   static NETWORK_ERROR(msg: string, cause?: unknown): WebSocketError
   /**
-   * An operation, such as `ping()` or `pong()`, was attempted before the socket finished connecting.
+   * An operation, such as `ping()` or `pong()`, was attempted before the socket finished connecting, or after it closed.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'NOT_CONNECTED'`, for the caller to throw.
    */
@@ -76,7 +76,7 @@ declare class WebSocketError extends Error {
    */
   static UNEXPECTED_CONTROL(msg?: string): WebSocketError
   /**
-   * Data was written with an encoding other than `buffer` or `utf8`.
+   * Data was written with an encoding other than `buffer` or `utf8`, or was not backed by bytes.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'INVALID_ENCODING'`, for the caller to throw.
    */
@@ -112,6 +112,18 @@ declare class WebSocketError extends Error {
    */
   static INVALID_ACCEPT_HEADER(msg?: string): WebSocketError
   /**
+   * The server's handshake response negotiated an extension, none of which this side ever offers.
+   * @param msg - The error message.
+   * @returns A `WebSocketError` with `code` set to `'UNEXPECTED_EXTENSION'`, for the caller to throw.
+   */
+  static UNEXPECTED_EXTENSION(msg?: string): WebSocketError
+  /**
+   * The server's handshake response named a subprotocol the client did not offer.
+   * @param msg - The error message.
+   * @returns A `WebSocketError` with `code` set to `'UNEXPECTED_PROTOCOL'`, for the caller to throw.
+   */
+  static UNEXPECTED_PROTOCOL(msg?: string): WebSocketError
+  /**
    * The server's handshake response carried a status other than `101`.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'INVALID_UPGRADE_STATUS'`, for the caller to throw.
@@ -136,7 +148,7 @@ declare class WebSocketError extends Error {
    */
   static INVALID_PAYLOAD_LENGTH(msg?: string): WebSocketError
   /**
-   * A control frame carried more than the 125 bytes RFC 6455 allows.
+   * A control frame carried more than the 125 bytes RFC 6455 allows, whether received or passed to `ping()` or `pong()`.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'INVALID_CONTROL_PAYLOAD_LENGTH'`, for the caller to throw.
    */
@@ -153,6 +165,12 @@ declare class WebSocketError extends Error {
    * @returns A `WebSocketError` with `code` set to `'TOO_MANY_FRAGMENTS'`, for the caller to throw.
    */
   static TOO_MANY_FRAGMENTS(msg?: string): WebSocketError
+  /**
+   * A frame was still incomplete after being buffered from more chunks than `maxBufferedChunks` allows.
+   * @param msg - The error message.
+   * @returns A `WebSocketError` with `code` set to `'TOO_MANY_CHUNKS'`, for the caller to throw.
+   */
+  static TOO_MANY_CHUNKS(msg?: string): WebSocketError
   /**
    * A text frame or close reason was not well-formed UTF-8.
    * @param msg - The error message.
