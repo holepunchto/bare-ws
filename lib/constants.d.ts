@@ -50,5 +50,11 @@ export const MAX_CONTROL_PAYLOAD_LENGTH: number
 export const MAX_PAYLOAD_LENGTH: number
 /** The default `maxFragments`. */
 export const MAX_FRAGMENTS: number
+/** The default `maxBufferedChunks`. */
+export const MAX_BUFFERED_CHUNKS: number
+/** The default `handshakeTimeout`, in milliseconds. */
+export const HANDSHAKE_TIMEOUT: number
 /** The default `idleTimeout`, in milliseconds. */
 export const IDLE_TIMEOUT: number
+/** How long a connection has to close of its own accord once it has been asked to, in milliseconds, before it is dropped. */
+export const CLOSE_TIMEOUT: number

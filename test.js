@@ -2959,3 +2959,138 @@ test('a peer that half-closes without a close frame is not waited on', async (t)
 
   await close()
 })
+
+test('a verifyClient that throws something other than an error still refuses', async (t) => {
+  const cases = [
+    [
+      'null',
+      () => {
+        throw null
+      },
+      'Upgrade rejected'
+    ],
+    [
+      'undefined',
+      () => {
+        throw undefined
+      },
+      'Upgrade rejected'
+    ],
+    [
+      'a string',
+      () => {
+        throw 'the token store is down'
+      },
+      'the token store is down'
+    ],
+    ['a rejection with null', () => Promise.reject(null), 'Upgrade rejected'],
+    ['a rejection with a number', () => Promise.reject(42), 'Upgrade rejected'],
+    ['a rejection with an error', () => Promise.reject(new Error('nope')), 'nope']
+  ]
+
+  t.plan(cases.length * 2)
+
+  for (const [name, verifyClient, message] of cases) {
+    const p = nextPort()
+
+    const server = new ws.Server({ port: p, verifyClient })
+
+    server.on('connection', () => t.fail('should not have upgraded'))
+
+    const reported = new Promise((resolve) => server.on('handshakeError', resolve))
+
+    await new Promise((resolve) => server.on('listening', resolve))
+
+    const status = await new Promise((resolve) => raw(p, upgrade(p), resolve))
+
+    t.is(status, 403, `answered 403 for ${name}`)
+    t.is((await reported).message, `UPGRADE_REJECTED: ${message}`, `reported for ${name}`)
+
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('a verifyClient that resolves after the peer has gone hands over nothing', async (t) => {
+  t.plan(3)
+
+  const p = nextPort()
+
+  let admit
+  const verifying = new Promise((resolve) => {
+    admit = resolve
+  })
+
+  let upgrading
+  const verifyingSocket = new Promise((resolve) => {
+    upgrading = resolve
+  })
+
+  // With the idle timeout off, a connection handed over after it has closed is
+  // never let go of again: its events were all emitted before the `WebSocket`
+  // adopting it was listening for them.
+  const server = new ws.Server({
+    port: p,
+    idleTimeout: 0,
+    verifyClient(req) {
+      upgrading(req.socket)
+
+      return verifying
+    }
+  })
+
+  server.on('connection', () => t.fail('should not have upgraded'))
+
+  const reported = new Promise((resolve) => server.on('handshakeError', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const client = new ws.Socket({ port: p, idleTimeout: 0 })
+
+  client.on('error', () => {})
+
+  const socket = await verifyingSocket
+
+  const closed = new Promise((resolve) => socket.on('close', resolve))
+
+  client.destroy()
+
+  await closed
+
+  admit(true)
+
+  t.is((await reported).code, 'NETWORK_ERROR', 'reported as a lost connection')
+  t.is(server.connections.size, 0, 'nothing was left in the connection set')
+  t.is(server._handshakes.size, 0, 'nothing was left mid-handshake')
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a server that accepts the connection and then says nothing is not waited on', async (t) => {
+  t.plan(3)
+
+  const p = nextPort()
+
+  // Nothing is read from the connection until the handshake is through, so
+  // there is no idle timer yet to notice that the peer has gone quiet.
+  const server = rawServer(() => {})
+
+  await new Promise((resolve) => server.listen(p, resolve))
+
+  const client = new ws.Socket({ port: p, handshakeTimeout: 100 })
+
+  const closed = closes(client)
+  const err = await settles(client)
+
+  t.is(err && err.code, 'CONNECTION_TIMEOUT', 'the handshake was given up on')
+  t.ok(await closed, 'the socket was let go of')
+
+  const patient = new ws.Socket({ port: p, handshakeTimeout: 0 })
+
+  patient.on('error', () => {})
+
+  t.is(await settles(patient, 300), null, 'a handshakeTimeout of 0 removes the bound')
+
+  patient.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
+})

@@ -44,9 +44,20 @@ interface WebSocketOptions {
   maxBufferedChunks?: number
 
   /**
+   * How long a client waits for a server to answer its handshake, in
+   * milliseconds. Nothing is read from the connection until the handshake is
+   * through, so `idleTimeout` does not cover it and a peer that accepts the
+   * connection and then says nothing would otherwise be waited on forever.
+   * Defaults to 30000; 0 disables it.
+   */
+  handshakeTimeout?: number
+
+  /**
    * How long the connection may go without a byte from the peer before it is
-   * dropped, in milliseconds. A ping goes out at half this interval, so an
-   * idle but responsive peer is kept. Defaults to 120000; 0 disables it.
+   * dropped, in milliseconds. Counted from the moment the socket is handed
+   * over, the handshake before it being bounded by `handshakeTimeout`. A ping
+   * goes out at half this interval, so an idle but responsive peer is kept.
+   * Defaults to 120000; 0 disables it.
    *
    * This measures silence rather than progress. A peer part way through a
    * frame refreshes the budget with every byte it sends, so one that trickles
@@ -58,6 +69,14 @@ interface WebSocketOptions {
    * long its own messages may take to arrive.
    */
   idleTimeout?: number
+}
+
+interface WebSocketHandshakeOptions {
+  /**
+   * How long to wait for the server to answer the handshake, in milliseconds.
+   * Defaults to 30000; 0 disables it.
+   */
+  timeout?: number
 }
 
 interface WebSocketEvents extends DuplexEvents {
@@ -106,10 +125,16 @@ declare class WebSocket {
 }
 
 declare namespace WebSocket {
-  export { type WebSocketOptions, type WebSocketEvents }
+  export { type WebSocketOptions, type WebSocketEvents, type WebSocketHandshakeOptions }
 
   export function handshake(
     req: HTTPClientRequest,
+    cb: (error: WebSocketError | null) => void
+  ): void
+
+  export function handshake(
+    req: HTTPClientRequest,
+    opts: WebSocketHandshakeOptions,
     cb: (error: WebSocketError | null) => void
   ): void
 }
