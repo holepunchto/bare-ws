@@ -50,12 +50,8 @@ export const MAX_CONTROL_PAYLOAD_LENGTH: number
 export const MAX_PAYLOAD_LENGTH: number
 /** The default `maxFragments`. */
 export const MAX_FRAGMENTS: number
-/** The default `maxBufferedChunks`. */
-export const MAX_BUFFERED_CHUNKS: number
-/** The default `minChunkAverage`, in bytes. */
-export const MIN_CHUNK_AVERAGE: number
-/** The default `minBufferedChunks`. */
-export const MIN_BUFFERED_CHUNKS: number
+/** The smallest buffer a payload is read into before it doubles as it fills, in bytes. */
+export const MIN_PAYLOAD_CAPACITY: number
 /** The default `handshakeTimeout`, in milliseconds. */
 export const HANDSHAKE_TIMEOUT: number
 /** The default `idleTimeout`, in milliseconds. */

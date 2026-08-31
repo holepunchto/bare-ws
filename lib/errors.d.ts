@@ -172,18 +172,6 @@ declare class WebSocketError extends Error {
    */
   static TOO_MANY_FRAGMENTS(msg?: string): WebSocketError
   /**
-   * A frame was still incomplete after being buffered from more chunks than `maxBufferedChunks` allows.
-   * @param msg - The error message.
-   * @returns A `WebSocketError` with `code` set to `'TOO_MANY_CHUNKS'`, for the caller to throw.
-   */
-  static TOO_MANY_CHUNKS(msg?: string): WebSocketError
-  /**
-   * A frame was still incomplete after being buffered from more chunks than the bytes it carries earn at `minChunkAverage`.
-   * @param msg - The error message.
-   * @returns A `WebSocketError` with `code` set to `'CHUNKS_TOO_SMALL'`, for the caller to throw.
-   */
-  static CHUNKS_TOO_SMALL(msg?: string): WebSocketError
-  /**
    * A text frame or close reason was not well-formed UTF-8.
    * @param msg - The error message.
    * @returns A `WebSocketError` with `code` set to `'INVALID_UTF8'`, for the caller to throw.
@@ -213,13 +201,6 @@ declare class WebSocketError extends Error {
    * @returns A `WebSocketError` with `code` set to `'CONNECTION_TIMEOUT'`, for the caller to throw.
    */
   static CONNECTION_TIMEOUT(msg?: string): WebSocketError
-  /**
-   * The buffered data does not yet contain a full frame. Not a protocol failure, so `status` is `0`.
-   * @param msg - The error message.
-   * @param length - The total byte length the frame needs before it can be decoded, or `-1` if not even its header is complete (default `-1`).
-   * @returns A `WebSocketError` with `code` set to `'INCOMPLETE_FRAME'` and `length` set to `length`, for the caller to throw.
-   */
-  static INCOMPLETE_FRAME(msg?: string, length?: number): WebSocketError & { length: number }
 }
 
 export = WebSocketError

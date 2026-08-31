@@ -3,9 +3,99 @@ const fs = require('bare-fs')
 const net = require('bare-tcp')
 const crypto = require('bare-crypto')
 const ws = require('.')
-const Frame = require('./lib/frame')
-const { GUID, EOL, EOF } = require('./lib/constants')
-const isValidUTF8 = require('./lib/utf8')
+const { GUID, EOL, EOF } = require('bare-ws/constants')
+
+// Speaks the handshake by hand and then keeps whatever a client puts on the
+// wire, so that what a client sends is judged as bytes and nothing else.
+function wireServer(port) {
+  const sockets = []
+
+  const wire = { bytes: Buffer.alloc(0) }
+
+  wire.server = net.createServer((socket) => {
+    sockets.push(socket)
+
+    socket.on('error', () => {})
+
+    let head = ''
+    let upgraded = false
+
+    socket.on('data', (data) => {
+      if (upgraded === false) {
+        head += data.toString('latin1')
+
+        const i = head.indexOf(EOF)
+
+        if (i === -1) return
+
+        upgraded = true
+
+        const key = /sec-websocket-key: (.*)\r\n/i.exec(head)[1]
+        const accept = crypto.createHash('sha1').update(key).update(GUID).digest('base64')
+
+        socket.write(
+          'HTTP/1.1 101 Switching Protocols' +
+            EOL +
+            'Upgrade: websocket' +
+            EOL +
+            'Connection: Upgrade' +
+            EOL +
+            `Sec-WebSocket-Accept: ${accept}` +
+            EOF
+        )
+
+        data = Buffer.from(head.slice(i + EOF.length), 'latin1')
+      }
+
+      wire.bytes = Buffer.concat([wire.bytes, data])
+    })
+  })
+
+  // Reads the frames kept so far, as far as the bytes in hand allow.
+  wire.frames = () => {
+    const frames = []
+
+    let at = 0
+
+    while (at < wire.bytes.byteLength) {
+      const rest = wire.bytes.subarray(at)
+
+      if (rest.byteLength < 2) break
+
+      const frame = payloadOf(rest)
+
+      if (frame.end > rest.byteLength) break
+
+      frames.push(frame)
+
+      at += frame.end
+    }
+
+    return frames
+  }
+
+  wire.close = () =>
+    new Promise((resolve) => {
+      for (const socket of sockets) socket.destroy()
+
+      wire.server.close(resolve)
+    })
+
+  wire.listen = () => new Promise((resolve) => wire.server.listen(port, resolve))
+
+  return wire
+}
+
+// Waits for a condition the peer's writes decide the timing of.
+async function until(fn, timeout = 5000) {
+  const deadline = Date.now() + timeout
+
+  while (fn() === false && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+  }
+
+  return fn()
+}
 
 const options = {
   cert: fs.readFileSync('test/fixtures/cert.crt'),
@@ -169,13 +259,18 @@ function upgrade(port, extra = '') {
   )
 }
 
-// A masked frame, with an all-zero mask so the payload passes through unchanged.
+// The key masked frames are written with, whose every byte differs so that a
+// payload masked with the wrong one of them does not come out intact anyway.
+const KEY = Buffer.from([0x37, 0xfa, 0x21, 0x3d])
+
+// One frame, as the bytes a peer would put on the wire, so that what is under
+// test is only ever reached the way a peer reaches it.
 function frame(opcode, payload = Buffer.alloc(0), opts = {}) {
-  const { fin = true, mask = true, length = payload.byteLength } = opts
+  const { fin = true, mask = true, length = payload.byteLength, rsv = 0 } = opts
 
   const header = []
 
-  header.push((fin ? 0x80 : 0) | opcode)
+  header.push((fin ? 0x80 : 0) | (rsv << 4) | opcode)
 
   if (length <= 0x7d) header.push((mask ? 0x80 : 0) | length)
   else if (length <= 0xffff) {
@@ -190,9 +285,55 @@ function frame(opcode, payload = Buffer.alloc(0), opts = {}) {
     )
   }
 
-  if (mask) header.push(0, 0, 0, 0)
+  if (mask === false) return Buffer.concat([Buffer.from(header), payload])
 
-  return Buffer.concat([Buffer.from(header), payload])
+  header.push(...KEY)
+
+  const masked = Buffer.alloc(payload.byteLength)
+
+  for (let i = 0; i < masked.byteLength; i++) masked[i] = payload[i] ^ KEY[i & 3]
+
+  return Buffer.concat([Buffer.from(header), masked])
+}
+
+// Payload bytes as they go on the wire behind a masked header, for the tests
+// that hand a payload over in pieces of their own choosing. Which byte of the
+// key applies follows from the position in the payload.
+function maskBytes(payload, position = 0) {
+  const masked = Buffer.alloc(payload.byteLength)
+
+  for (let i = 0; i < masked.byteLength; i++) masked[i] = payload[i] ^ KEY[(position + i) & 3]
+
+  return masked
+}
+
+// The payload of the first frame in a buffer of them, read the way a peer would
+// have to: the header says how long it is and where the payload starts.
+function payloadOf(buffer) {
+  const masked = (buffer[1] & 0x80) !== 0
+
+  let length = buffer[1] & 0x7f
+  let at = 2
+
+  if (length === 0x7e) {
+    length = buffer.readUInt16BE(2)
+    at = 4
+  } else if (length === 0x7f) {
+    length = Number(buffer.readBigUInt64BE(2))
+    at = 10
+  }
+
+  const key = masked ? buffer.subarray(at, at + 4) : null
+
+  if (masked) at += 4
+
+  const payload = Buffer.alloc(length)
+
+  for (let i = 0; i < length; i++) {
+    payload[i] = key === null ? buffer[at + i] : buffer[at + i] ^ key[i & 3]
+  }
+
+  return { opcode: buffer[0] & 0x0f, fin: (buffer[0] & 0x80) !== 0, key, payload, end: at + length }
 }
 
 test('malformed handshake is answered and the server survives', async (t) => {
@@ -605,48 +746,6 @@ test('the client masks every frame it sends, close included', async (t) => {
   await new Promise((resolve) => server.close(resolve))
 })
 
-test('frame encodes each reserved bit from its own flag', (t) => {
-  t.plan(3)
-
-  t.is(new Frame(0x1, Buffer.from('x'), { rsv1: true }).toBuffer()[0], 0b11000001, 'rsv1 only')
-  t.is(new Frame(0x1, Buffer.from('x'), { rsv2: true }).toBuffer()[0], 0b10100001, 'rsv2 only')
-  t.is(new Frame(0x1, Buffer.from('x'), { rsv3: true }).toBuffer()[0], 0b10010001, 'rsv3 only')
-})
-
-test('decode measures what is left from the start of the frame', (t) => {
-  t.plan(2)
-
-  const a = new Frame(0x2, Buffer.from('AAAA')).toBuffer()
-  const b = new Frame(0x2, Buffer.from('BBBBBBBB')).toBuffer()
-
-  const buffer = Buffer.concat([a, b]).subarray(0, a.byteLength + b.byteLength - 4)
-
-  const state = { start: 0, end: buffer.byteLength, buffer }
-
-  t.alike(Frame.decode(state).payload, Buffer.from('AAAA'), 'first frame decodes')
-
-  try {
-    const frame = Frame.decode(state)
-    t.fail(`second frame should be incomplete, got ${frame.payload.byteLength} bytes`)
-  } catch (err) {
-    t.is(err.code, 'INCOMPLETE_FRAME', 'truncated second frame is refused')
-  }
-})
-
-test('decoded payloads do not alias the read buffer', (t) => {
-  t.plan(1)
-
-  const buffer = new Frame(0x2, Buffer.from('hello')).toBuffer()
-
-  const state = { start: 0, end: buffer.byteLength, buffer }
-
-  const { payload } = Frame.decode(state)
-
-  buffer.fill(0)
-
-  t.alike(payload, Buffer.from('hello'), 'payload survives the buffer being reused')
-})
-
 test('a silent peer is dropped once the idle timeout expires', async (t) => {
   t.plan(2)
 
@@ -700,224 +799,111 @@ test('a peer that answers pings is kept', async (t) => {
   await new Promise((resolve) => server.close(resolve))
 })
 
-test('pongs are coalesced while the socket is backed up', (t) => {
-  t.plan(4)
-
-  const written = []
-
-  // A socket that accepts the first write and reports itself full thereafter,
-  // which is what a peer that never reads looks like from this side.
-  const fake = {
-    writable: true,
-    write(data) {
-      written.push(data)
-      return written.length < 1
-    },
-    on() {
-      return this
-    },
-    destroy() {}
-  }
-
-  const socket = new ws.Socket({ socket: fake, isServer: true, idleTimeout: 0 })
-
-  for (let i = 0; i < 1000; i++) socket._onping(Buffer.from([i & 0xff]))
-
-  t.is(written.length, 1, 'only the first ping was answered directly')
-  t.ok(socket._corked, 'the socket reported itself full')
-  t.alike(socket._pendingPong, Buffer.from([999 & 0xff]), 'the newest ping is the one still owed')
-
-  socket._ondrain()
-
-  t.is(written.length, 2, 'one thousand pings cost two pongs, not one thousand')
-
-  socket.destroy()
-})
-
 // The lengths either side of the two points where the wire format changes shape:
 // 125 is the last one that fits in the length field, 0xffff the last that fits
 // in the 16 bit extension.
 const LENGTHS = [0, 1, 2, 125, 126, 127, 128, 0xfffe, 0xffff, 0x10000, 0x10001]
 
-test('frame roundtrips at every length boundary, unmasked', (t) => {
+test('a message of every length survives the trip in both directions', async (t) => {
   t.plan(LENGTHS.length * 2)
 
-  for (const length of LENGTHS) {
-    const payload = Buffer.alloc(length, 'x')
-    const buffer = new Frame(0x2, payload).toBuffer()
-    const frame = Frame.decode({ start: 0, end: buffer.byteLength, buffer })
-
-    t.is(frame.payload.byteLength, length, `${length} bytes decoded`)
-    t.alike(frame.payload, payload, `${length} bytes intact`)
-  }
-})
-
-test('frame roundtrips at every length boundary, masked', (t) => {
-  t.plan(LENGTHS.length * 2)
+  const { client, socket, close } = await pair()
 
   for (const length of LENGTHS) {
-    const payload = Buffer.alloc(length, 'y')
-    const buffer = new Frame(0x2, payload, { mask: Buffer.alloc(4) }).toBuffer()
-    const frame = Frame.decode({ start: 0, end: buffer.byteLength, buffer })
+    const payload = Buffer.alloc(length, 0x78)
 
-    t.ok(frame.mask !== null, `${length} bytes reported as masked`)
-    t.alike(frame.payload, payload, `${length} bytes unmasked correctly`)
+    // A client masks what it sends and a server masks none of it, so the two
+    // directions are not the same code path.
+    client.write(payload)
+    t.alike(await message(socket), payload, `${length} bytes from the client`)
+
+    socket.write(payload)
+    t.alike(await message(client), payload, `${length} bytes from the server`)
   }
+
+  await close()
 })
 
-test('each frame gets a fresh mask', (t) => {
-  t.plan(2)
+test('a client masks each frame with a key of its own', async (t) => {
+  t.plan(4)
 
-  const mask = Buffer.allocUnsafe(4)
+  const wire = wireServer(nextPort())
+
+  await wire.listen()
+
+  const client = new ws.Socket({ port: wire.server.address().port })
+
+  await new Promise((resolve, reject) => client.on('open', resolve).on('error', reject))
+
   const payload = Buffer.from('the same payload every time')
 
-  const a = new Frame(0x1, payload, { mask }).toBuffer()
-  const b = new Frame(0x1, payload, { mask }).toBuffer()
+  client.write(payload)
+  client.write(payload)
 
-  t.unlike(a, b, 'two frames of the same payload differ on the wire')
+  t.ok(await until(() => wire.frames().length === 2), 'both frames went out')
 
-  const decoded = Frame.decode({ start: 0, end: b.byteLength, buffer: b })
+  const [first, second] = wire.frames()
 
-  t.alike(decoded.payload, payload, 'and both still decode to the payload')
+  t.unlike(first.key, second.key, 'two frames of the same payload carry different keys')
+  t.alike(first.payload, payload, 'the first unmasks to the payload')
+  t.alike(second.payload, payload, 'and so does the second')
+
+  client.destroy()
+
+  await wire.close()
 })
 
-test('frame flags and opcodes roundtrip', (t) => {
-  const cases = [
-    { fin: true, rsv1: false, rsv2: false, rsv3: false },
-    { fin: false, rsv1: false, rsv2: false, rsv3: false },
-    { fin: true, rsv1: true, rsv2: false, rsv3: false },
-    { fin: true, rsv1: false, rsv2: true, rsv3: false },
-    { fin: true, rsv1: false, rsv2: false, rsv3: true },
-    { fin: false, rsv1: true, rsv2: true, rsv3: true }
-  ]
-
-  t.plan(cases.length + 3)
-
-  for (const flags of cases) {
-    const buffer = new Frame(0x1, Buffer.from('x'), flags).toBuffer()
-    const frame = Frame.decode({ start: 0, end: buffer.byteLength, buffer })
-
-    t.alike(
-      { fin: frame.fin, rsv1: frame.rsv1, rsv2: frame.rsv2, rsv3: frame.rsv3 },
-      flags,
-      JSON.stringify(flags)
-    )
-  }
-
-  for (const op of [0x0, 0x1, 0x2]) {
-    const buffer = new Frame(op, Buffer.from('x'), { fin: false }).toBuffer()
-
-    t.is(
-      Frame.decode({ start: 0, end: buffer.byteLength, buffer }).opcode,
-      op,
-      `opcode 0x${op.toString(16)}`
-    )
-  }
-})
-
-test('frame takes options in place of a payload', (t) => {
-  t.plan(2)
-
-  const frame = new Frame(0x9, { fin: false })
-
-  t.is(frame.payload.byteLength, 0, 'payload defaults to empty')
-  t.is(frame.fin, false, 'options were read from the second argument')
-})
-
-test('decode refuses a payload length past the safe integer range', (t) => {
+test('a payload length past the safe integer range is refused', async (t) => {
   t.plan(1)
 
+  const p = nextPort()
+  const server = serve(p)
+
+  const failed = new Promise((resolve) => {
+    server.on('connection', (socket) => socket.on('error', resolve))
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
   // A 64 bit length whose high word is 0x00200000, which is 2^53.
-  const buffer = Buffer.from([0x82, 0x7f, 0x00, 0x20, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00])
-
-  t.exception(
-    () => Frame.decode({ start: 0, end: buffer.byteLength, buffer }),
-    /INVALID_PAYLOAD_LENGTH/
+  const peer = raw(p, upgrade(p), (status, socket) =>
+    socket.write(Buffer.from([0x82, 0xff, 0x00, 0x20, 0, 0, 0, 0, 0, 0, 0x37, 0xfa, 0x21, 0x3d]))
   )
+
+  t.is((await failed).code, 'INVALID_PAYLOAD_LENGTH', 'refused on the header')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
 })
 
-test('decode asks for more bytes at each stage of a header', (t) => {
-  const partials = [
-    ['empty', []],
-    ['one byte', [0x82]],
-    ['16 bit length, one byte short', [0x82, 0x7e, 0x00]],
-    ['64 bit length, one byte short', [0x82, 0x7f, 0, 0, 0, 0, 0, 0, 0]],
-    ['mask, one byte short', [0x82, 0x84, 0, 0, 0]],
-    ['payload, one byte short', [0x82, 0x04, 0x61, 0x62, 0x63]]
-  ]
-
-  t.plan(partials.length)
-
-  for (const [name, bytes] of partials) {
-    const buffer = Buffer.from(bytes)
-
-    try {
-      Frame.decode({ start: 0, end: buffer.byteLength, buffer })
-      t.fail(`${name} should have been incomplete`)
-    } catch (err) {
-      t.is(err.code, 'INCOMPLETE_FRAME', name)
-    }
-  }
-})
-
-test('an incomplete frame reports how long it will be', (t) => {
+test('a maxPayload of -1 removes the ceiling', async (t) => {
   t.plan(2)
 
-  const complete = new Frame(0x2, Buffer.alloc(300, 'z')).toBuffer()
-  const buffer = complete.subarray(0, 10)
+  // A header declaring 1 GiB, with none of the payload behind it.
+  const header = frame(0x2, Buffer.alloc(0), { length: 0x40000000 })
 
-  try {
-    Frame.decode({ start: 0, end: buffer.byteLength, buffer })
-    t.fail('should have been incomplete')
-  } catch (err) {
-    t.is(err.code, 'INCOMPLETE_FRAME')
-    t.is(err.length, complete.byteLength, 'reports the full frame length, header included')
-  }
-})
+  for (const [maxPayload, code, name] of [
+    [1024, 'MESSAGE_TOO_LARGE', 'refused under a limit'],
+    [-1, null, 'without a limit the header is simply waited on']
+  ]) {
+    const p = nextPort()
+    const server = serve(p, { maxPayload })
 
-test('frames encode back to back into one buffer', (t) => {
-  t.plan(3)
+    const connected = new Promise((resolve) => server.once('connection', resolve))
 
-  const frames = [
-    new Frame(0x1, Buffer.from('one')),
-    new Frame(0x2, Buffer.from('two')),
-    new Frame(0x1, Buffer.from('three'))
-  ]
+    await new Promise((resolve) => server.on('listening', resolve))
 
-  const state = { start: 0, end: 0, buffer: null }
+    const peer = raw(p, upgrade(p), (status, socket) => socket.write(header))
 
-  for (const frame of frames) Frame.preencode(state, frame)
+    const socket = await connected
+    const err = await settles(socket, 500)
 
-  state.buffer = Buffer.allocUnsafe(state.end)
-  state.start = 0
+    t.is(err && err.code, code, name)
 
-  for (const frame of frames) Frame.encode(state, frame)
+    peer.destroy()
+    socket.destroy()
 
-  const read = { start: 0, end: state.buffer.byteLength, buffer: state.buffer }
-
-  t.alike(Frame.decode(read).payload, Buffer.from('one'))
-  t.alike(Frame.decode(read).payload, Buffer.from('two'))
-  t.alike(Frame.decode(read).payload, Buffer.from('three'))
-})
-
-test('maxPayload of -1 removes the ceiling', (t) => {
-  t.plan(2)
-
-  // A header declaring 1 GiB, with no payload behind it.
-  const buffer = Buffer.from([0x82, 0x7f, 0, 0, 0, 0, 0x40, 0x00, 0x00, 0x00])
-
-  try {
-    Frame.decode({ start: 0, end: buffer.byteLength, buffer }, { maxPayload: 1024 })
-    t.fail('should have been refused')
-  } catch (err) {
-    t.is(err.code, 'MESSAGE_TOO_LARGE', 'refused under a limit')
-  }
-
-  try {
-    Frame.decode({ start: 0, end: buffer.byteLength, buffer }, { maxPayload: -1 })
-    t.fail('should have asked for more bytes')
-  } catch (err) {
-    t.is(err.code, 'INCOMPLETE_FRAME', 'without a limit it just wants the payload')
+    await new Promise((resolve) => server.close(resolve))
   }
 })
 
@@ -993,27 +979,32 @@ function message(socket) {
 }
 
 test('a string is sent as a text frame and a buffer as a binary one', async (t) => {
-  t.plan(4)
+  t.plan(6)
 
-  const opcodes = []
-  const { client, socket, close } = await pair()
+  const wire = wireServer(nextPort())
 
-  const onframe = socket._onframe.bind(socket)
-  socket._onframe = (frame) => {
-    opcodes.push(frame.opcode)
-    return onframe(frame)
-  }
+  await wire.listen()
+
+  const client = new ws.Socket({ port: wire.server.address().port })
+
+  await new Promise((resolve, reject) => client.on('open', resolve).on('error', reject))
 
   client.write('some text')
-  t.alike(await message(socket), Buffer.from('some text'), 'text arrives')
-
   client.write(Buffer.from('some bytes'))
-  t.alike(await message(socket), Buffer.from('some bytes'), 'bytes arrive')
 
-  t.is(opcodes[0], 0x1, 'a string went out as TEXT')
-  t.is(opcodes[1], 0x2, 'a buffer went out as BINARY')
+  t.ok(await until(() => wire.frames().length === 2), 'two frames went out')
 
-  await close()
+  const [text, binary] = wire.frames()
+
+  t.is(text.opcode, 0x1, 'a string went out as TEXT')
+  t.alike(text.payload, Buffer.from('some text'), 'carrying the string')
+  t.is(binary.opcode, 0x2, 'a buffer went out as BINARY')
+  t.alike(binary.payload, Buffer.from('some bytes'), 'carrying the bytes')
+  t.ok(text.fin && binary.fin, 'both finished the message they opened')
+
+  client.destroy()
+
+  await wire.close()
 })
 
 test('messages of every shape survive the round trip', async (t) => {
@@ -1515,7 +1506,7 @@ test('a server may be given an HTTP server of its own', async (t) => {
 })
 
 test('destroying a client mid-handshake does not leak the connection', async (t) => {
-  t.plan(2)
+  t.plan(1)
 
   const p = nextPort()
   const server = serve(p)
@@ -1533,8 +1524,6 @@ test('destroying a client mid-handshake does not leak the connection', async (t)
   client.destroy()
 
   await new Promise((resolve) => setTimeout(resolve, 200))
-
-  t.is(client._socket, null, 'no socket was adopted after the fact')
 
   // Which only completes if nothing is still holding a connection open.
   await new Promise((resolve) => server.close(resolve))
@@ -1797,19 +1786,34 @@ test('maxPayload of -1 lets an oversized message through', async (t) => {
 test('an idleTimeout of 0 leaves a silent connection alone', async (t) => {
   t.plan(2)
 
-  const { socket, close } = await pair({ server: { idleTimeout: 0 } })
+  const p = nextPort()
+  const server = serve(p, { idleTimeout: 0 })
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const received = []
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.on('data', (data) => received.push(data))
+  })
+
+  const socket = await connected
 
   let failure = null
 
   socket.on('error', (err) => (failure = err))
 
-  t.is(socket._idleTimer, null, 'no timer was armed')
-
   await new Promise((resolve) => setTimeout(resolve, 300))
 
+  t.is(received.length, 0, 'a silent peer was never pinged')
   t.absent(failure, 'still connected after a period of silence')
 
-  await close()
+  peer.destroy()
+  socket.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
 })
 
 test('the server handshake accepts its documented argument shapes', async (t) => {
@@ -2012,7 +2016,7 @@ test('a protocol failure with a write parked still tears the socket down', async
 })
 
 test('a peer cannot pile up more than the read queue holds', async (t) => {
-  t.plan(3)
+  t.plan(2)
 
   const p = nextPort()
   const server = serve(p)
@@ -2021,21 +2025,22 @@ test('a peer cannot pile up more than the read queue holds', async (t) => {
 
   await new Promise((resolve) => server.on('listening', resolve))
 
+  let backedUp = false
+
   const peer = raw(p, upgrade(p), (status, socket) => {
     // Nobody is reading on the other end, so this may only be taken as fast as
-    // the read queue is drained.
-    for (let i = 0; i < 32; i++) socket.write(frame(0x2, Buffer.alloc(1024 * 1024, 0x61)))
+    // the read queue is drained, which the peer sees as its own writes backing
+    // up rather than being swallowed.
+    for (let i = 0; i < 32; i++) {
+      if (socket.write(frame(0x2, Buffer.alloc(1024 * 1024, 0x61))) === false) backedUp = true
+    }
   })
 
   const socket = await connected
 
   await new Promise((resolve) => setTimeout(resolve, 1000))
 
-  t.ok(socket._paused, 'the socket was paused')
-  t.ok(
-    socket._readableState.buffered < 8 * 1024 * 1024,
-    `queued ${socket._readableState.buffered} bytes of the 32 MiB sent`
-  )
+  t.ok(backedUp, 'the peer was made to wait rather than being read from freely')
 
   // Reading again lets the rest through rather than dropping it.
   let received = 0
@@ -2073,58 +2078,6 @@ test('a typed array that is not a buffer is sent as the bytes it holds', async (
   t.alike(await second, Buffer.from([1, 2]), 'a wider view is sent as its bytes, not its elements')
 
   await close()
-})
-
-test('a frame takes any view of bytes as its payload, options and all', (t) => {
-  t.plan(4)
-
-  const mask = Buffer.alloc(4)
-
-  const binary = new Frame(0x2, new Uint8Array([1, 2, 3]), { mask })
-
-  t.is(binary.payload.byteLength, 3, 'the payload survived')
-  t.is(binary.mask, mask, 'the options survived alongside it')
-
-  const wide = new Frame(0x2, new Uint16Array([1, 2, 3]))
-
-  t.is(wide.payload.byteLength, 6, 'a wider view is measured in bytes')
-
-  const options = new Frame(0x2, { fin: false })
-
-  t.is(options.fin, false, 'options may still stand in for a payload')
-})
-
-test('a tail left over from a large read does not pin the whole buffer', async (t) => {
-  t.plan(2)
-
-  const p = nextPort()
-  const server = serve(p)
-
-  const connected = new Promise((resolve) => server.once('connection', resolve))
-
-  await new Promise((resolve) => server.on('listening', resolve))
-
-  const peer = raw(p, upgrade(p), (status, socket) => {
-    socket.write(frame(0x2, Buffer.alloc(8 * 1024 * 1024, 0x61)))
-    // The first byte of a frame that never arrives, so the tail is held on to.
-    socket.write(Buffer.from([0x82]))
-  })
-
-  const socket = await connected
-
-  socket.on('data', () => {})
-
-  await new Promise((resolve) => setTimeout(resolve, 1000))
-
-  t.is(socket._buffered, 1, 'a single byte is left over')
-  t.ok(
-    socket._buffer[0].buffer.byteLength < 8 * 1024 * 1024,
-    `it is backed by ${socket._buffer[0].buffer.byteLength} bytes, not the 8 MiB it arrived in`
-  )
-
-  peer.destroy()
-  socket.destroy()
-  await new Promise((resolve) => server.close(resolve))
 })
 
 test('a control frame payload is refused before it reaches the wire', async (t) => {
@@ -2281,99 +2234,108 @@ test('a client refuses what it never put on the table', async (t) => {
   }
 })
 
-test('a frame trickled out in too many chunks is refused', async (t) => {
-  t.plan(1)
+test('a frame trickled out one byte at a time is read rather than refused', async (t) => {
+  t.plan(2)
 
   const p = nextPort()
-  const server = serve(p, { maxBufferedChunks: 32 })
+  const server = serve(p)
 
-  const failed = new Promise((resolve) => {
-    server.on('connection', (socket) => socket.on('error', resolve))
-  })
+  const connected = new Promise((resolve) => server.once('connection', resolve))
 
   await new Promise((resolve) => server.on('listening', resolve))
 
-  // A header promising a payload that then arrives one byte per read, so the
-  // parts held on to grow without the bytes in them ever nearing `maxPayload`.
-  const peer = raw(p, upgrade(p), async (status, socket) => {
-    socket.write(frame(0x2, Buffer.alloc(0), { length: 1024 }).subarray(0, 8))
+  const payload = Buffer.alloc(600, 0x61)
 
-    for (let i = 0; i < 128 && !socket.destroyed; i++) {
-      socket.write(Buffer.from([0x61]))
+  const buffer = frame(0x2, payload)
+
+  // One byte per read, which the chunk accounting this replaced refused
+  // outright and which is now simply read.
+  const peer = raw(p, upgrade(p), async (status, socket) => {
+    for (let i = 0; i < buffer.byteLength && !socket.destroyed; i++) {
+      socket.write(buffer.subarray(i, i + 1))
 
       await new Promise((resolve) => setTimeout(resolve, 0))
     }
   })
 
-  t.is((await failed).code, 'TOO_MANY_CHUNKS', 'the parts held on to were bounded')
+  const socket = await connected
+
+  const failed = new Promise((resolve) => socket.on('error', resolve))
+
+  t.alike(await message(socket), payload, 'the message came through a byte at a time')
 
   peer.destroy()
+
+  t.is((await failed).code, 'UNEXPECTED_CLOSE', 'the trickle itself was never refused')
+
+  socket.destroy()
   await new Promise((resolve) => server.close(resolve))
 })
 
-test('a frame trickled out in chunks too small to have earned them is refused', async (t) => {
-  t.plan(1)
+test('a header declaring far more than arrives is waited on, not refused', async (t) => {
+  t.plan(2)
 
   const p = nextPort()
-  // The grace is spent by the first 8 chunks, after which each further one is
-  // earned by 64 bytes that never arrive.
-  const server = serve(p, {
-    minBufferedChunks: 8,
-    minChunkAverage: 64,
-    maxBufferedChunks: -1
-  })
+  const server = serve(p)
 
-  const failed = new Promise((resolve) => {
-    server.on('connection', (socket) => socket.on('error', resolve))
-  })
+  const connected = new Promise((resolve) => server.once('connection', resolve))
 
   await new Promise((resolve) => server.on('listening', resolve))
 
-  const peer = raw(p, upgrade(p), async (status, socket) => {
-    socket.write(frame(0x2, Buffer.alloc(0), { length: 1024 }).subarray(0, 8))
-
-    for (let i = 0; i < 128 && !socket.destroyed; i++) {
-      socket.write(Buffer.from([0x61]))
-
-      await new Promise((resolve) => setTimeout(resolve, 0))
-    }
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    // A header declaring 64 MiB, of which only a little is ever sent.
+    socket.write(frame(0x2, Buffer.alloc(0), { length: 64 * 1024 * 1024 }))
+    socket.write(maskBytes(Buffer.alloc(64 * 1024, 0x61)))
   })
 
-  t.is((await failed).code, 'CHUNKS_TOO_SMALL', 'the parts held on to had to be paid for')
+  const socket = await connected
+
+  socket.on('data', () => t.fail('the message was never whole'))
+
+  t.is(await settles(socket, 500), null, 'the connection was left alone')
 
   peer.destroy()
+
+  t.is(socket.closeCode, 1006, 'and only ended when the peer went away')
+
+  socket.destroy()
   await new Promise((resolve) => server.close(resolve))
 })
 
-test('a frame arriving in chunks that carry their keep is not refused', async (t) => {
-  t.plan(1)
+test('a frame split at every byte boundary still arrives whole', async (t) => {
+  const payload = Buffer.alloc(300, 0x7a)
+
+  const buffer = frame(0x2, payload)
+
+  t.plan(buffer.byteLength + 1)
 
   const p = nextPort()
-  const server = serve(p, { minBufferedChunks: 8, minChunkAverage: 64 })
+  const server = serve(p)
 
-  const message = new Promise((resolve) => {
-    server.on('connection', (socket) => socket.on('data', resolve))
-  })
+  const messages = []
+
+  server.on('connection', (socket) => socket.on('data', (data) => messages.push(data)))
 
   await new Promise((resolve) => server.on('listening', resolve))
 
-  // Chunks of exactly the average asked for, well past the grace, so the
-  // allowance a peer earns has to keep pace with what it sends.
-  const payload = Buffer.alloc(64 * 256, 0x61)
+  // Every split of one frame into two writes, so a header or a payload cut at
+  // any byte has to be picked back up where it was left.
+  for (let at = 0; at <= buffer.byteLength; at++) {
+    const received = new Promise((resolve) => {
+      const peer = raw(p, upgrade(p), (status, socket) => {
+        socket.write(buffer.subarray(0, at))
+        socket.write(buffer.subarray(at))
+        setTimeout(() => resolve(peer), 30)
+      })
+    })
 
-  const peer = raw(p, upgrade(p), async (status, socket) => {
-    socket.write(frame(0x2, Buffer.alloc(0), { length: payload.byteLength }).subarray(0, 8))
+    const peer = await received
 
-    for (let i = 0; i < 256 && !socket.destroyed; i++) {
-      socket.write(payload.subarray(i * 64, (i + 1) * 64))
+    t.alike(messages.pop(), payload, `split at ${at}`)
 
-      await new Promise((resolve) => setTimeout(resolve, 0))
-    }
-  })
+    peer.destroy()
+  }
 
-  t.alike(await message, payload, 'the message came through')
-
-  peer.destroy()
   await new Promise((resolve) => server.close(resolve))
 })
 
@@ -2443,17 +2405,18 @@ test('a handshake error is reported before the socket is torn down', async (t) =
   await new Promise((resolve) => server.close(resolve))
 })
 
-// Writes until the socket pushes back and a write callback is left parked.
+// Writes until the socket pushes back, which is what a peer that has stopped
+// reading looks like from this side.
 async function park(socket) {
   const data = Buffer.alloc(1024 * 1024, 0x61)
 
-  for (let i = 0; i < 128 && socket._pendingWrite === null; i++) {
-    socket.write(data)
+  for (let i = 0; i < 128; i++) {
+    if (socket.write(data) === false) return true
 
     await new Promise((resolve) => setTimeout(resolve, 0))
   }
 
-  return socket._pendingWrite !== null
+  return false
 }
 
 // Whether the stream finishes destroying, rather than hanging on a callback
@@ -2465,7 +2428,7 @@ function closes(socket, timeout = 5000) {
   ])
 }
 
-test('every shape of UTF-8 sequence is judged on its own', (t) => {
+test('every shape of UTF-8 sequence is judged on its own', async (t) => {
   const cases = [
     ['', true, 'nothing at all'],
     ['61', true, 'one byte'],
@@ -2489,9 +2452,34 @@ test('every shape of UTF-8 sequence is judged on its own', (t) => {
 
   t.plan(cases.length)
 
+  const p = nextPort()
+  const server = serve(p)
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
   for (const [hex, valid, name] of cases) {
-    t.is(isValidUTF8(Buffer.from(hex, 'hex')), valid, name)
+    const payload = Buffer.from(hex, 'hex')
+
+    const connected = new Promise((resolve) => server.once('connection', resolve))
+
+    const peer = raw(p, upgrade(p), (status, socket) => socket.write(frame(0x1, payload)))
+
+    const socket = await connected
+
+    const outcome = await Promise.race([
+      new Promise((resolve) => socket.on('data', (data) => resolve({ data }))),
+      new Promise((resolve) => socket.on('error', (err) => resolve({ err }))),
+      new Promise((resolve) => setTimeout(() => resolve({}), 1000))
+    ])
+
+    if (valid) t.alike(outcome.data, payload, name)
+    else t.is(outcome.err && outcome.err.code, 'INVALID_UTF8', name)
+
+    peer.destroy()
+    socket.destroy()
   }
+
+  await new Promise((resolve) => server.close(resolve))
 })
 
 test('writing something that is not backed by bytes is refused', async (t) => {
@@ -2610,14 +2598,14 @@ function settles(socket, timeout = 3000) {
 }
 
 test('a reserved opcode is refused on the frame that carries it', async (t) => {
-  t.plan(2)
+  t.plan(1)
 
   const p = nextPort()
   const server = serve(p)
 
   const failed = new Promise((resolve) => {
     server.on('connection', (socket) => {
-      socket.on('error', (err) => resolve({ err, buffered: socket._fragmented }))
+      socket.on('error', resolve)
     })
   })
 
@@ -2628,10 +2616,7 @@ test('a reserved opcode is refused on the frame that carries it', async (t) => {
     socket.write(frame(0x3, Buffer.alloc(4096), { fin: false }))
   )
 
-  const { err, buffered } = await failed
-
-  t.is(err.code, 'INVALID_OPCODE', 'refused')
-  t.is(buffered, 0, 'nothing was buffered for it')
+  t.is((await failed).code, 'INVALID_OPCODE', 'refused')
 
   peer.destroy()
   await new Promise((resolve) => server.close(resolve))
@@ -2640,19 +2625,27 @@ test('a reserved opcode is refused on the frame that carries it', async (t) => {
 test('a negative bound removes the fragment limit', async (t) => {
   t.plan(1)
 
-  const { client, socket, close } = await pair({ server: { maxFragments: -1 } })
+  const p = nextPort()
+  const server = serve(p, { maxFragments: -1 })
 
-  const read = message(socket)
+  const connected = new Promise((resolve) => server.once('connection', resolve))
 
-  const mask = Buffer.alloc(4)
+  await new Promise((resolve) => server.on('listening', resolve))
 
-  client._socket.write(new Frame(0x1, Buffer.from('a'), { fin: false, mask }).toBuffer())
-  client._socket.write(new Frame(0x0, Buffer.from('b'), { fin: false, mask }).toBuffer())
-  client._socket.write(new Frame(0x0, Buffer.from('c'), { mask }).toBuffer())
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.write(frame(0x1, Buffer.from('a'), { fin: false }))
+    socket.write(frame(0x0, Buffer.from('b'), { fin: false }))
+    socket.write(frame(0x0, Buffer.from('c')))
+  })
 
-  t.alike(await read, Buffer.from('abc'), 'assembled without a limit to hit')
+  const socket = await connected
 
-  await close()
+  t.alike(await message(socket), Buffer.from('abc'), 'assembled without a limit to hit')
+
+  peer.destroy()
+  socket.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
 })
 
 test('a connection lost without a close frame is told apart from a clean one', async (t) => {
@@ -2667,7 +2660,7 @@ test('a connection lost without a close frame is told apart from a clean one', a
     const closed = closes(client)
 
     if (mode === 'clean') socket.end()
-    else socket._socket.destroy()
+    else socket.destroy()
 
     const err = await Promise.race([failed, closed.then(() => null)])
 
@@ -2746,32 +2739,6 @@ test('a close frame carrying no status is answered with none', async (t) => {
   t.is(reply.byteLength, 2, 'answered with an empty close frame')
 
   await new Promise((resolve) => server.close(resolve))
-})
-
-test('a buffered chunk is not left pinning the read buffer it came in', async (t) => {
-  t.plan(2)
-
-  const { client, socket, close } = await pair()
-
-  // A header promising far more than the trickle that follows, so the chunks
-  // pile up unparsed.
-  client._socket.write(Buffer.from([0x82, 0x7e, 0xff, 0xff]))
-
-  for (let i = 0; i < 64; i++) {
-    client._socket.write(Buffer.from([0x41]))
-    await new Promise((resolve) => setTimeout(resolve, 1))
-  }
-
-  const pinned = new Set(socket._buffer.map((chunk) => chunk.buffer))
-
-  let bytes = 0
-
-  for (const buffer of pinned) bytes += buffer.byteLength
-
-  t.ok(socket._buffer.length > 1, `${socket._buffer.length} chunks are being held`)
-  t.is(bytes, socket._buffered, 'holding on to no more than they carry')
-
-  await close()
 })
 
 test('an upgrade handed over with the wrong status is refused', (t) => {
@@ -3005,25 +2972,29 @@ test('a peer that half-closes without a close frame is not waited on', async (t)
 
   // With the idle timeout off nothing else can rescue this, so the half-close
   // has to be noticed on its own.
-  const { client, socket, close } = await pair({
-    server: { idleTimeout: 0 },
-    client: { idleTimeout: 0 }
+  const p = nextPort()
+  const server = serve(p, { idleTimeout: 0 })
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    // A `FIN` and nothing else, which leaves that end writable so the socket
+    // never closes of its own accord.
+    socket.end()
   })
 
-  socket.on('error', () => {})
+  const socket = await connected
 
-  const failed = new Promise((resolve) => client.on('error', resolve))
-
-  // A `FIN` and nothing else, which leaves that end writable so the socket
-  // never closes of its own accord.
-  socket._socket.end()
-
-  const err = await failed
+  const err = await new Promise((resolve) => socket.on('error', resolve))
 
   t.is(err.code, 'UNEXPECTED_CLOSE', 'the lost connection was noticed')
-  t.is(client.closeCode, 1006, 'reported as an abnormal closure')
+  t.is(socket.closeCode, 1006, 'reported as an abnormal closure')
 
-  await close()
+  peer.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
 })
 
 test('a verifyClient that throws something other than an error still refuses', async (t) => {
@@ -3077,7 +3048,7 @@ test('a verifyClient that throws something other than an error still refuses', a
 })
 
 test('a verifyClient that resolves after the peer has gone hands over nothing', async (t) => {
-  t.plan(3)
+  t.plan(2)
 
   const p = nextPort()
 
@@ -3126,7 +3097,6 @@ test('a verifyClient that resolves after the peer has gone hands over nothing', 
 
   t.is((await reported).code, 'NETWORK_ERROR', 'reported as a lost connection')
   t.is(server.connections.size, 0, 'nothing was left in the connection set')
-  t.is(server._handshakes.size, 0, 'nothing was left mid-handshake')
 
   await new Promise((resolve) => server.close(resolve))
 })
@@ -3176,7 +3146,7 @@ test('an IPv6 URL is connected to without its brackets', async (t) => {
   )
 
   t.ok(await opened, 'connected to the literal')
-  t.is(client._socket.remoteAddress, '::1', 'connected to the address the URL named')
+  t.is(server.address().address, '::1', 'to a server listening on that address alone')
 
   client.destroy()
 
@@ -3242,7 +3212,7 @@ test('what the server underneath reports reaches the one the caller holds', asyn
 })
 
 test('a handshake that never finishes is given up on', async (t) => {
-  t.plan(4)
+  t.plan(3)
 
   const p = nextPort()
 
@@ -3263,7 +3233,6 @@ test('a handshake that never finishes is given up on', async (t) => {
 
   t.is(await answered, 408, 'answered 408')
   t.is((await reported).code, 'CONNECTION_TIMEOUT', 'reported as a timeout')
-  t.is(server._handshakes.size, 0, 'nothing was left mid-handshake')
   t.is(server.connections.size, 0, 'nothing was handed over')
 
   await new Promise((resolve) => server.close(resolve))
@@ -3284,19 +3253,22 @@ test('a handshakeTimeout of 0 removes the bound on the server too', async (t) =>
 
   await new Promise((resolve) => server.on('listening', resolve))
 
+  let closed = false
+
   const socket = raw(p, upgrade(p), () => t.fail('should not have been answered'))
+
+  socket.on('close', () => (closed = true))
 
   await new Promise((resolve) => setTimeout(resolve, 300))
 
-  t.is(server._handshakes.size, 1, 'still waiting on the handshake')
+  t.absent(closed, 'still waiting on the handshake rather than dropping it')
 
   socket.destroy()
 
-  await new Promise((resolve) => setTimeout(resolve, 50))
-
-  t.is(server._handshakes.size, 0, 'let go of once the peer went away')
-
+  // Which only completes if the server is not still holding the connection.
   await new Promise((resolve) => server.close(resolve))
+
+  t.is(server.connections.size, 0, 'nothing was handed over')
 })
 
 test('a verifyClient that resolves after the deadline is answered only once', async (t) => {
@@ -3344,50 +3316,200 @@ test('a verifyClient that resolves after the deadline is answered only once', as
 test('how long a peer has to answer a close frame is configurable', async (t) => {
   t.plan(2)
 
-  // A peer that reads nothing back never answers the close frame it is owed.
-  const { client, close } = await pair({ client: { closeTimeout: 100 } })
+  // A peer that never sends a close frame back leaves this side waiting on one
+  // it is owed, which is what the timeout bounds.
+  for (const [closeTimeout, dropped, name] of [
+    [100, true, 'dropped once its time was up'],
+    [0, false, 'a closeTimeout of 0 removes the bound']
+  ]) {
+    const p = nextPort()
+    const server = serve(p, { closeTimeout, idleTimeout: 0 })
 
-  client.on('error', () => {})
-  client._socket.pause()
+    const connected = new Promise((resolve) => server.once('connection', resolve))
 
-  const closed = closes(client, 1000)
+    await new Promise((resolve) => server.on('listening', resolve))
 
-  client.end()
+    const peer = raw(p, upgrade(p), () => {})
 
-  t.ok(await closed, 'dropped once its time was up')
+    const socket = await connected
 
-  await close()
+    socket.on('error', () => {})
 
-  const patient = await pair({ client: { closeTimeout: 0, idleTimeout: 0 } })
+    const gone = closes(socket, 600)
 
-  patient.client.on('error', () => {})
-  patient.client._socket.pause()
-  patient.client.end()
+    socket.end()
 
-  t.absent(await closes(patient.client, 300), 'a closeTimeout of 0 removes the bound')
+    t.is(await gone, dropped, name)
 
-  await patient.close()
+    peer.destroy()
+    socket.destroy()
+
+    await new Promise((resolve) => server.close(resolve))
+  }
 })
 
-test('data that arrives while the socket is being torn down is not parsed', async (t) => {
+test('invalid text is refused on the byte that spoils it', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  // A megabyte of text declared, of which only a bad first sequence is ever
+  // sent. Nothing waits for the rest of it.
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.write(frame(0x1, Buffer.alloc(0), { length: 1024 * 1024 }))
+    socket.write(maskBytes(Buffer.from([0x61, 0xc3, 0x28])))
+  })
+
+  const socket = await connected
+
+  const err = await settles(socket, 2000)
+
+  t.is(err && err.code, 'INVALID_UTF8', 'refused with three bytes of a megabyte in hand')
+  t.is(socket.closeCode, 1006, 'the connection was failed rather than closed')
+
+  peer.destroy()
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a text message may not end part way through a sequence', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const cases = [
+    ['one frame', [frame(0x1, Buffer.from([0x61, 0xc3]))]],
+    [
+      'the last of several',
+      [
+        frame(0x1, Buffer.from([0x61, 0xc3]), { fin: false }),
+        frame(0x0, Buffer.alloc(0), { fin: true })
+      ]
+    ]
+  ]
+
+  for (const [name, frames] of cases) {
+    const connected = new Promise((resolve) => server.once('connection', resolve))
+
+    const peer = raw(p, upgrade(p), (status, socket) => {
+      for (const buffer of frames) socket.write(buffer)
+    })
+
+    const socket = await connected
+    const err = await settles(socket, 2000)
+
+    t.is(err && err.code, 'INVALID_UTF8', name)
+
+    peer.destroy()
+  }
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a sequence straddling a chunk or a fragment is still whole', async (t) => {
   t.plan(3)
 
-  const { client, socket, close } = await pair()
+  const p = nextPort()
+  const server = serve(p)
 
-  client.on('error', () => {})
+  const messages = []
 
-  client.destroy()
+  server.on('connection', (socket) => socket.on('data', (data) => messages.push(data)))
 
-  // `destroy` only marks the stream; the socket is not let go of until the
-  // teardown runs, so anything already on its way still arrives here.
-  t.ok(client._socket !== null, 'the socket was still attached')
+  await new Promise((resolve) => server.on('listening', resolve))
 
-  client._socket.emit('data', frame(0x2, Buffer.from('hello'), { mask: false }))
+  const text = Buffer.from('a€b😀c', 'utf8')
 
-  t.is(client._buffered, 0, 'nothing was buffered')
-  t.is(client._buffer.length, 0, 'nothing was held on to')
+  // Split inside the three byte sequence, between two writes of one frame.
+  const whole = frame(0x1, text)
+  const at = whole.byteLength - text.byteLength + 2
 
-  socket.on('error', () => {})
+  const first = new Promise((resolve) => {
+    const peer = raw(p, upgrade(p), (status, socket) => {
+      socket.write(whole.subarray(0, at))
+      setTimeout(() => {
+        socket.write(whole.subarray(at))
+        setTimeout(() => resolve(peer), 50)
+      }, 20)
+    })
+  })
 
-  await close()
+  ;(await first).destroy()
+
+  t.alike(messages.pop(), text, 'split inside a sequence in one frame')
+
+  // And the same split put across two fragments of one message.
+  const second = new Promise((resolve) => {
+    const peer = raw(p, upgrade(p), (status, socket) => {
+      socket.write(frame(0x1, text.subarray(0, 2), { fin: false }))
+      socket.write(frame(0x0, text.subarray(2), { fin: true }))
+      setTimeout(() => resolve(peer), 50)
+    })
+  })
+
+  ;(await second).destroy()
+
+  t.alike(messages.pop(), text, 'split inside a sequence across two fragments')
+  t.is(messages.length, 0, 'nothing else arrived')
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
+test('a peer that floods pings while reading nothing is not answered one for one', async (t) => {
+  t.plan(2)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const connected = new Promise((resolve) => server.once('connection', resolve))
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const PINGS = 100000
+
+  const ping = frame(0x9, Buffer.alloc(125, 0x61))
+
+  let back = 0
+
+  const peer = raw(p, upgrade(p), async (status, socket) => {
+    // Nothing is read back while the pings go out, so the answers owed pile up
+    // on the far side rather than one going out for each.
+    socket.pause()
+
+    for (let i = 0; i < PINGS; i++) {
+      socket.write(ping)
+
+      if ((i & 0x3ff) === 0) await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    socket.on('data', (data) => (back += data.byteLength))
+    socket.resume()
+  })
+
+  const socket = await connected
+
+  let pings = 0
+
+  socket.on('ping', () => pings++)
+
+  t.ok(await until(() => pings === PINGS, 20000), `all ${PINGS} pings were heard`)
+
+  await new Promise((resolve) => setTimeout(resolve, 500))
+
+  t.ok(
+    back < (PINGS * ping.byteLength) / 4,
+    `${back} bytes came back, not the ${PINGS * ping.byteLength} an answer each would cost`
+  )
+
+  peer.destroy()
+  socket.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
 })
