@@ -2,6 +2,7 @@ import { HTTPClientRequest } from 'bare-http1'
 import { Socket as TCPSocket } from 'bare-tcp'
 import { Duplex, type DuplexEvents } from 'bare-stream'
 import URL from 'bare-url'
+import Buffer from 'bare-buffer'
 import WebSocketError from './errors'
 
 interface WebSocketOptions {
@@ -16,24 +17,115 @@ interface WebSocketOptions {
   secure?: boolean
   /** An already-connected TCP socket to use instead of opening a new connection. */
   socket?: TCPSocket
+
+  /**
+   * Whether this side of the connection is the server, which masks no frame it
+   * sends and requires every frame it receives to be masked. Set for you by
+   * `WebSocketServer`; pass it alongside `socket` when adopting a connection
+   * this side accepted itself. Defaults to `false`.
+   */
+  isServer?: boolean
+
+  /**
+   * The largest message accepted, in bytes, counted across every fragment it
+   * is assembled from. A frame whose header declares more than the message has
+   * left is refused before any room is made for its payload. A payload is read
+   * into a buffer of its own as it arrives, so an unfragmented message costs
+   * this much; a fragmented one costs twice, its fragments being joined once
+   * the last of them is in. Defaults to 100 MiB; -1 removes the limit.
+   */
+  maxPayload?: number
+
+  /**
+   * The most fragments a single message may be assembled from. Bounded apart
+   * from `maxPayload` because an empty fragment costs a peer almost nothing.
+   * Defaults to 1024; -1 removes the limit.
+   */
+  maxFragments?: number
+
+  /**
+   * How long a client waits for a server to answer its handshake, in
+   * milliseconds. Nothing is read from the connection until the handshake is
+   * through, so `idleTimeout` does not cover it and a peer that accepts the
+   * connection and then says nothing would otherwise be waited on forever.
+   * Defaults to 30000; 0 disables it.
+   */
+  handshakeTimeout?: number
+
+  /**
+   * How long the connection may go without a byte from the peer before it is
+   * dropped, in milliseconds. Counted from the moment the socket is handed
+   * over, the handshake before it being bounded by `handshakeTimeout`. A ping
+   * goes out at half this interval, so an idle but responsive peer is kept.
+   * Defaults to 120000; 0 disables it.
+   *
+   * This measures silence rather than progress. A peer part way through a
+   * frame refreshes the budget with every byte it sends, so one that trickles
+   * them out holds on to everything it has sent for as long as it keeps
+   * sending; what that costs is bounded by `maxPayload` rather than by time,
+   * nothing being held beyond the payload itself. Liveness beyond this, such as
+   * requiring the peer to answer every ping or to finish what it started
+   * within some deadline, is left to the application, since only it knows how
+   * long its own messages may take to arrive.
+   */
+  idleTimeout?: number
+
+  /**
+   * How long the peer has to answer this side's close frame, in milliseconds,
+   * before the connection is dropped. Also the grace the socket is given to
+   * flush a close frame that has been queued, so that a peer which has stopped
+   * reading does not hold the connection open. Defaults to 5000; 0 removes the
+   * bound, leaving `idleTimeout` as the only backstop.
+   */
+  closeTimeout?: number
+}
+
+interface WebSocketHandshakeOptions {
+  /**
+   * How long to wait for the server to answer the handshake, in milliseconds.
+   * Defaults to 30000; 0 disables it.
+   */
+  timeout?: number
 }
 
 interface WebSocketEvents extends DuplexEvents {
-  /**
-   * @param data - The payload of the ping frame; a string is converted to a `Buffer`.
-   * @throws {NOT_CONNECTED} the socket has not finished connecting.
-   */
-  ping: [payload: unknown]
-  /**
-   * @param data - The payload of the pong frame; a string is converted to a `Buffer`.
-   * @throws {NOT_CONNECTED} the socket has not finished connecting.
-   */
-  pong: [payload: unknown]
+  /** Emitted with the payload of a ping frame received from the peer, which is answered with a pong automatically unless this side has already sent its close frame. */
+  ping: [payload: Buffer]
+  /** Emitted with the payload of a pong frame received from the peer. */
+  pong: [payload: Buffer]
 }
 
 interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<M> {
-  ping(data: unknown): void
-  pong(data: unknown): void
+  /**
+   * The status the peer closed with, once it has sent a close frame. `1005` if
+   * the close frame carried no status, and `1006` until one arrives at all, so
+   * a connection that went away without closing keeps it. Readable from a
+   * `close` listener.
+   */
+  readonly closeCode: number
+
+  /**
+   * The reason the peer closed with, empty unless its close frame carried one
+   * past the status. Readable from a `close` listener.
+   */
+  readonly closeReason: Buffer
+
+  /**
+   * Send a ping frame to the peer.
+   * @param data - The payload of the ping frame, at most 125 bytes; a string is converted to a `Buffer`.
+   * @throws {NOT_CONNECTED} the socket has not finished connecting, has closed, or has been ended, since nothing may follow the close frame that ending sends.
+   * @throws {INVALID_CONTROL_PAYLOAD_LENGTH} `data` is longer than 125 bytes.
+   * @throws {TypeError} `data` is neither a string nor a view of bytes.
+   */
+  ping(data?: string | Buffer): void
+  /**
+   * Send a pong frame to the peer.
+   * @param data - The payload of the pong frame, at most 125 bytes; a string is converted to a `Buffer`.
+   * @throws {NOT_CONNECTED} the socket has not finished connecting, has closed, or has been ended, since nothing may follow the close frame that ending sends.
+   * @throws {INVALID_CONTROL_PAYLOAD_LENGTH} `data` is longer than 125 bytes.
+   * @throws {TypeError} `data` is neither a string nor a view of bytes.
+   */
+  pong(data?: string | Buffer): void
 }
 
 declare class WebSocket {
@@ -42,10 +134,16 @@ declare class WebSocket {
 }
 
 declare namespace WebSocket {
-  export { type WebSocketOptions, type WebSocketEvents }
+  export { type WebSocketOptions, type WebSocketEvents, type WebSocketHandshakeOptions }
 
   export function handshake(
     req: HTTPClientRequest,
+    cb: (error: WebSocketError | null) => void
+  ): void
+
+  export function handshake(
+    req: HTTPClientRequest,
+    opts: WebSocketHandshakeOptions,
     cb: (error: WebSocketError | null) => void
   ): void
 }

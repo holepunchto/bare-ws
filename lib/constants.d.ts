@@ -18,5 +18,43 @@ export const opcode: {
   PONG: number
 }
 
-/** WebSocket close status codes for protocol errors (`PROTOCOL_ERROR`) and oversized messages (`MESSAGE_TOO_LARGE`). */
-export const status: { PROTOCOL_ERROR: number; MESSAGE_TOO_LARGE: number }
+/** The WebSocket close status codes defined by RFC 6455 and the IANA registry. */
+export const status: {
+  NORMAL_CLOSURE: number
+  GOING_AWAY: number
+  PROTOCOL_ERROR: number
+  UNSUPPORTED_DATA: number
+  NO_STATUS_RECEIVED: number
+  ABNORMAL_CLOSURE: number
+  INVALID_PAYLOAD: number
+  POLICY_VIOLATION: number
+  MESSAGE_TOO_LARGE: number
+  MISSING_EXTENSION: number
+  INTERNAL_ERROR: number
+  SERVICE_RESTART: number
+  TRY_AGAIN_LATER: number
+  BAD_GATEWAY: number
+  TLS_HANDSHAKE_FAILURE: number
+}
+
+/**
+ * Whether a close status may be sent in a close frame.
+ * @param code - The close status to check.
+ * @returns `false` outside the registered ranges, for the reserved `1004`, and for the three codes only a local endpoint may report.
+ */
+export function isValidStatus(code: number): boolean
+
+/** The largest payload a control frame may carry (`125`), as defined by RFC 6455. */
+export const MAX_CONTROL_PAYLOAD_LENGTH: number
+/** The default `maxPayload`, in bytes. */
+export const MAX_PAYLOAD_LENGTH: number
+/** The default `maxFragments`. */
+export const MAX_FRAGMENTS: number
+/** The smallest buffer a payload is read into before it doubles as it fills, in bytes. */
+export const MIN_PAYLOAD_CAPACITY: number
+/** The default `handshakeTimeout`, in milliseconds. */
+export const HANDSHAKE_TIMEOUT: number
+/** The default `idleTimeout`, in milliseconds. */
+export const IDLE_TIMEOUT: number
+/** How long a connection has to close of its own accord once it has been asked to, in milliseconds, before it is dropped. */
+export const CLOSE_TIMEOUT: number
