@@ -1,4 +1,4 @@
-import { HTTPClientRequest } from 'bare-http1'
+import { HTTPClientRequest, type HTTPHeaderValue } from 'bare-http1'
 import { Socket as TCPSocket } from 'bare-tcp'
 import { Duplex, type DuplexEvents } from 'bare-stream'
 import URL from 'bare-url'
@@ -6,6 +6,12 @@ import Buffer from 'bare-buffer'
 import WebSocketError from './errors'
 
 interface WebSocketOptions {
+  /**
+   * Headers included in the opening handshake. Set `Sec-WebSocket-Protocol`
+   * here to offer one or more subprotocols to the server.
+   */
+  headers?: Record<string, HTTPHeaderValue>
+
   /** The host to connect to. */
   host?: string
   /** Alias for `host`, accepted for Node.js compatibility. */
@@ -96,6 +102,12 @@ interface WebSocketEvents extends DuplexEvents {
 }
 
 interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<M> {
+  /**
+   * The subprotocol selected by the server. Empty before the client connection
+   * opens and when the handshake selects no subprotocol.
+   */
+  readonly protocol: string
+
   /**
    * The status the peer closed with, once it has sent a close frame. `1005` if
    * the close frame carried no status, and `1006` until one arrives at all, so
