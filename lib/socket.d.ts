@@ -89,6 +89,14 @@ interface WebSocketHandshakeOptions {
 }
 
 interface WebSocketEvents extends DuplexEvents {
+  /**
+   * Emitted once for each complete text or binary message, after fragments
+   * have been reassembled. The same payload remains available through the
+   * readable stream; `binary` is `true` for a binary message and `false` for
+   * text.
+   */
+  message: [payload: Buffer, binary: boolean]
+
   /** Emitted with the payload of a ping frame received from the peer, which is answered with a pong automatically unless this side has already sent its close frame. */
   ping: [payload: Buffer]
   /** Emitted with the payload of a pong frame received from the peer. */
