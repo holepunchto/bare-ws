@@ -1625,6 +1625,58 @@ test('the server may close the connection', async (t) => {
   await close()
 })
 
+test('close sends the selected status and reason', async (t) => {
+  t.plan(6)
+
+  const wire = wireServer(nextPort())
+
+  await wire.listen()
+
+  const client = new ws.Socket({ port: wire.server.address().port })
+
+  await new Promise((resolve, reject) => client.on('open', resolve).on('error', reject))
+
+  t.is(client.close(1001, 'bye now'), undefined, 'returns nothing')
+  t.ok(await until(() => wire.frames().length === 1), 'a frame went out')
+
+  const [closing] = wire.frames()
+
+  t.is(closing.opcode, 0x8, 'it is a close frame')
+  t.ok(closing.fin && closing.key !== null, 'finished and masked')
+  t.is(closing.payload.readUInt16BE(0), 1001, 'carrying the selected status')
+  t.alike(closing.payload.subarray(2), Buffer.from('bye now'), 'and reason')
+
+  client.destroy()
+
+  await wire.close()
+})
+
+test('close validates statuses and the encoded reason length', async (t) => {
+  const { client, close } = await pair()
+
+  const invalid = [999, 1004, 1005, 1006, 1015, 5000, NaN, 1000.5]
+
+  t.plan(invalid.length + 3)
+
+  for (const code of invalid) {
+    await t.exception.all(
+      () => client.close(code),
+      /Close status/,
+      `${code} is not valid on the wire`
+    )
+  }
+
+  await t.exception.all(
+    () => client.close(1000, 'a'.repeat(124)),
+    /Close reason/,
+    '124 ASCII bytes'
+  )
+  await t.exception.all(() => client.close(1000, 'é'.repeat(62)), /Close reason/, '124 UTF-8 bytes')
+  t.is(client.close(3000, 'a'.repeat(123)), undefined, 'the full valid range is accepted')
+
+  await close()
+})
+
 const REFUSALS = [
   ['RSV1 set', () => Buffer.from([0xc1, 0x80, 0, 0, 0, 0]), 'UNEXPECTED_RSV1'],
   ['RSV2 set', () => Buffer.from([0xa1, 0x80, 0, 0, 0, 0]), 'UNEXPECTED_RSV2'],
