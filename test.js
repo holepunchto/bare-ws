@@ -1672,7 +1672,11 @@ test('close validates statuses and the encoded reason length', async (t) => {
     '124 ASCII bytes'
   )
   await t.exception.all(() => client.close(1000, 'é'.repeat(62)), /Close reason/, '124 UTF-8 bytes')
-  t.is(client.close(3000, 'a'.repeat(123)), undefined, 'the full valid range is accepted')
+  t.is(
+    client.close(3000, Buffer.alloc(123, 'a')),
+    undefined,
+    'buffers up to the limit are accepted'
+  )
 
   await close()
 })

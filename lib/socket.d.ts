@@ -102,11 +102,11 @@ interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<
    * be at most 123 bytes. Defaults to status `1000` with an empty reason.
    *
    * @param code - The close status sent to the peer.
-   * @param reason - A human-readable reason sent after the status.
+   * @param reason - A human-readable reason, as text or bytes, sent after the status.
    * @throws {RangeError} `code` is not a valid close status, or `reason` is
    * longer than 123 bytes once encoded as UTF-8.
    */
-  close(code?: number, reason?: string): void
+  close(code?: number, reason?: string | Buffer): void
 
   /**
    * The status the peer closed with, once it has sent a close frame. `1005` if
