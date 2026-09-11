@@ -1125,6 +1125,78 @@ test('a fragmented message may be split into many pieces', async (t) => {
   await new Promise((resolve) => server.close(resolve))
 })
 
+test('message reports complete text and binary messages without replacing stream data', async (t) => {
+  t.plan(7)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const messages = []
+  const streamed = []
+
+  const received = new Promise((resolve) => {
+    server.on('connection', (socket) => {
+      const done = () => {
+        if (messages.length === 4 && streamed.length === 4) resolve(socket)
+      }
+
+      socket.on('message', (payload, binary) => {
+        messages.push({ payload, binary })
+        done()
+      })
+
+      socket.on('data', (payload) => {
+        streamed.push(payload)
+        done()
+      })
+    })
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.write(
+      Buffer.concat([
+        frame(0x1, Buffer.from('text'), { mask: true }),
+        frame(0x2, Buffer.from([1, 2]), { mask: true }),
+        frame(0x1, Buffer.from('frag'), { fin: false, mask: true }),
+        frame(0x0, Buffer.from('mented'), { mask: true }),
+        frame(0x2, Buffer.from([3]), { fin: false, mask: true }),
+        frame(0x0, Buffer.from([4]), { mask: true })
+      ])
+    )
+  })
+
+  const socket = await received
+  const payloads = [
+    Buffer.from('text'),
+    Buffer.from([1, 2]),
+    Buffer.from('fragmented'),
+    Buffer.from([3, 4])
+  ]
+
+  t.alike(
+    messages.map(({ payload }) => payload),
+    payloads,
+    'complete messages are emitted'
+  )
+  t.alike(
+    messages.map(({ binary }) => binary),
+    [false, true, false, true],
+    'text and binary are identified'
+  )
+  t.alike(streamed, payloads, 'the readable stream receives the same messages')
+
+  for (let i = 0; i < messages.length; i++) {
+    t.is(messages[i].payload, streamed[i], `message ${i} shares its streamed payload`)
+  }
+
+  peer.destroy()
+  socket.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
 test('a multi-byte character split across fragments still validates', async (t) => {
   t.plan(1)
 
@@ -2596,6 +2668,61 @@ test('a subprotocol the client offered is accepted', async (t) => {
     t.is(err && err.code, code, name)
 
     if (req.socket) req.socket.destroy()
+
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
+test('the selected subprotocol is exposed once the client opens', async (t) => {
+  t.plan(9)
+
+  const cases = [
+    ['chat, superchat', 'superchat', null],
+    [undefined, undefined, null],
+    ['chat', 'other', 'UNEXPECTED_PROTOCOL']
+  ]
+
+  for (const [offered, selected, error] of cases) {
+    const p = nextPort()
+
+    const server = rawServer((socket) => {
+      let head = ''
+
+      socket.on('data', (data) => {
+        head += data.toString()
+
+        if (!head.includes(EOF)) return
+
+        const key = /sec-websocket-key: (.*)\r\n/i.exec(head)[1]
+        const accept = crypto.createHash('sha1').update(key).update(GUID).digest('base64')
+        const protocol = selected === undefined ? '' : `Sec-WebSocket-Protocol: ${selected}${EOL}`
+
+        socket.write(
+          `HTTP/1.1 101 Switching Protocols${EOL}` +
+            `Connection: Upgrade${EOL}` +
+            `Upgrade: websocket${EOL}` +
+            `Sec-WebSocket-Accept: ${accept}${EOL}` +
+            protocol +
+            EOL
+        )
+      })
+    })
+
+    await new Promise((resolve) => server.listen(p, resolve))
+
+    const headers = offered === undefined ? undefined : { 'Sec-WebSocket-Protocol': offered }
+    const client = new ws.Socket({ port: p, headers })
+
+    t.is(client.protocol, null, 'unset before the connection opens')
+
+    const err = await new Promise((resolve) =>
+      client.on('open', () => resolve(null)).on('error', resolve)
+    )
+
+    t.is(err && err.code, error, error ? 'the unoffered selection is refused' : 'opened')
+    t.is(client.protocol, error === null ? selected || null : null, 'the negotiated value')
+
+    client.destroy()
 
     await new Promise((resolve) => server.close(resolve))
   }

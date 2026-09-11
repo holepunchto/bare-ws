@@ -1,4 +1,4 @@
-import { HTTPClientRequest } from 'bare-http1'
+import { HTTPClientRequest, type HTTPHeaderValue } from 'bare-http1'
 import { Socket as TCPSocket } from 'bare-tcp'
 import { Duplex, type DuplexEvents } from 'bare-stream'
 import URL from 'bare-url'
@@ -6,6 +6,12 @@ import Buffer from 'bare-buffer'
 import WebSocketError from './errors'
 
 interface WebSocketOptions {
+  /**
+   * Headers included in the opening handshake. Set `Sec-WebSocket-Protocol`
+   * here to offer one or more subprotocols to the server.
+   */
+  headers?: Record<string, HTTPHeaderValue>
+
   /** The host to connect to. */
   host?: string
   /** Alias for `host`, accepted for Node.js compatibility. */
@@ -89,6 +95,14 @@ interface WebSocketHandshakeOptions {
 }
 
 interface WebSocketEvents extends DuplexEvents {
+  /**
+   * Emitted once for each complete text or binary message, after fragments
+   * have been reassembled. The same payload remains available through the
+   * readable stream; `binary` is `true` for a binary message and `false` for
+   * text.
+   */
+  message: [payload: Buffer, binary: boolean]
+
   /** Emitted with the payload of a ping frame received from the peer, which is answered with a pong automatically unless this side has already sent its close frame. */
   ping: [payload: Buffer]
   /** Emitted with the payload of a pong frame received from the peer. */
@@ -107,6 +121,12 @@ interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<
    * longer than 123 bytes once encoded as UTF-8.
    */
   close(code?: number, reason?: string | Buffer): void
+
+  /**
+   * The subprotocol selected by the server. `null` before the client connection
+   * opens and when the handshake selects no subprotocol.
+   */
+  readonly protocol: string | null
 
   /**
    * The status the peer closed with, once it has sent a close frame. `1005` if
