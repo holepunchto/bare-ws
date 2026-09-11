@@ -2617,6 +2617,61 @@ test('a subprotocol the client offered is accepted', async (t) => {
   }
 })
 
+test('the selected subprotocol is exposed once the client opens', async (t) => {
+  t.plan(9)
+
+  const cases = [
+    ['chat, superchat', 'superchat', null],
+    [undefined, undefined, null],
+    ['chat', 'other', 'UNEXPECTED_PROTOCOL']
+  ]
+
+  for (const [offered, selected, error] of cases) {
+    const p = nextPort()
+
+    const server = rawServer((socket) => {
+      let head = ''
+
+      socket.on('data', (data) => {
+        head += data.toString()
+
+        if (!head.includes(EOF)) return
+
+        const key = /sec-websocket-key: (.*)\r\n/i.exec(head)[1]
+        const accept = crypto.createHash('sha1').update(key).update(GUID).digest('base64')
+        const protocol = selected === undefined ? '' : `Sec-WebSocket-Protocol: ${selected}${EOL}`
+
+        socket.write(
+          `HTTP/1.1 101 Switching Protocols${EOL}` +
+            `Connection: Upgrade${EOL}` +
+            `Upgrade: websocket${EOL}` +
+            `Sec-WebSocket-Accept: ${accept}${EOL}` +
+            protocol +
+            EOL
+        )
+      })
+    })
+
+    await new Promise((resolve) => server.listen(p, resolve))
+
+    const headers = offered === undefined ? undefined : { 'Sec-WebSocket-Protocol': offered }
+    const client = new ws.Socket({ port: p, headers })
+
+    t.is(client.protocol, null, 'unset before the connection opens')
+
+    const err = await new Promise((resolve) =>
+      client.on('open', () => resolve(null)).on('error', resolve)
+    )
+
+    t.is(err && err.code, error, error ? 'the unoffered selection is refused' : 'opened')
+    t.is(client.protocol, error === null ? selected || null : null, 'the negotiated value')
+
+    client.destroy()
+
+    await new Promise((resolve) => server.close(resolve))
+  }
+})
+
 test('a peer that answers without upgrading is reported, not waited on', async (t) => {
   t.plan(2)
 
