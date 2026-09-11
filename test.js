@@ -2585,14 +2585,14 @@ test('the selected subprotocol is exposed once the client opens', async (t) => {
     const headers = offered === undefined ? undefined : { 'Sec-WebSocket-Protocol': offered }
     const client = new ws.Socket({ port: p, headers })
 
-    t.is(client.protocol, '', 'empty before the connection opens')
+    t.is(client.protocol, null, 'unset before the connection opens')
 
     const err = await new Promise((resolve) =>
       client.on('open', () => resolve(null)).on('error', resolve)
     )
 
     t.is(err && err.code, error, error ? 'the unoffered selection is refused' : 'opened')
-    t.is(client.protocol, error === null ? selected || '' : '', 'the negotiated value')
+    t.is(client.protocol, error === null ? selected || null : null, 'the negotiated value')
 
     client.destroy()
 

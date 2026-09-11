@@ -103,10 +103,10 @@ interface WebSocketEvents extends DuplexEvents {
 
 interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<M> {
   /**
-   * The subprotocol selected by the server. Empty before the client connection
+   * The subprotocol selected by the server. `null` before the client connection
    * opens and when the handshake selects no subprotocol.
    */
-  readonly protocol: string
+  readonly protocol: string | null
 
   /**
    * The status the peer closed with, once it has sent a close frame. `1005` if
