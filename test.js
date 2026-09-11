@@ -1125,6 +1125,78 @@ test('a fragmented message may be split into many pieces', async (t) => {
   await new Promise((resolve) => server.close(resolve))
 })
 
+test('message reports complete text and binary messages without replacing stream data', async (t) => {
+  t.plan(7)
+
+  const p = nextPort()
+  const server = serve(p)
+
+  const messages = []
+  const streamed = []
+
+  const received = new Promise((resolve) => {
+    server.on('connection', (socket) => {
+      const done = () => {
+        if (messages.length === 4 && streamed.length === 4) resolve(socket)
+      }
+
+      socket.on('message', (payload, binary) => {
+        messages.push({ payload, binary })
+        done()
+      })
+
+      socket.on('data', (payload) => {
+        streamed.push(payload)
+        done()
+      })
+    })
+  })
+
+  await new Promise((resolve) => server.on('listening', resolve))
+
+  const peer = raw(p, upgrade(p), (status, socket) => {
+    socket.write(
+      Buffer.concat([
+        frame(0x1, Buffer.from('text'), { mask: true }),
+        frame(0x2, Buffer.from([1, 2]), { mask: true }),
+        frame(0x1, Buffer.from('frag'), { fin: false, mask: true }),
+        frame(0x0, Buffer.from('mented'), { mask: true }),
+        frame(0x2, Buffer.from([3]), { fin: false, mask: true }),
+        frame(0x0, Buffer.from([4]), { mask: true })
+      ])
+    )
+  })
+
+  const socket = await received
+  const payloads = [
+    Buffer.from('text'),
+    Buffer.from([1, 2]),
+    Buffer.from('fragmented'),
+    Buffer.from([3, 4])
+  ]
+
+  t.alike(
+    messages.map(({ payload }) => payload),
+    payloads,
+    'complete messages are emitted'
+  )
+  t.alike(
+    messages.map(({ binary }) => binary),
+    [false, true, false, true],
+    'text and binary are identified'
+  )
+  t.alike(streamed, payloads, 'the readable stream receives the same messages')
+
+  for (let i = 0; i < messages.length; i++) {
+    t.is(messages[i].payload, streamed[i], `message ${i} shares its streamed payload`)
+  }
+
+  peer.destroy()
+  socket.destroy()
+
+  await new Promise((resolve) => server.close(resolve))
+})
+
 test('a multi-byte character split across fragments still validates', async (t) => {
   t.plan(1)
 
