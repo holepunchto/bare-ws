@@ -111,6 +111,18 @@ interface WebSocketEvents extends DuplexEvents {
 
 interface WebSocket<M extends WebSocketEvents = WebSocketEvents> extends Duplex<M> {
   /**
+   * Start the closing handshake with a status and optional reason. The status
+   * must be valid to send in a close frame, and the UTF-8 encoded reason must
+   * be at most 123 bytes. Defaults to status `1000` with an empty reason.
+   *
+   * @param code - The close status sent to the peer.
+   * @param reason - A human-readable reason, as text or bytes, sent after the status.
+   * @throws {RangeError} `code` is not a valid close status, or `reason` is
+   * longer than 123 bytes once encoded as UTF-8.
+   */
+  close(code?: number, reason?: string | Buffer): void
+
+  /**
    * The subprotocol selected by the server. `null` before the client connection
    * opens and when the handshake selects no subprotocol.
    */
