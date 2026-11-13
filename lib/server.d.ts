@@ -1,4 +1,4 @@
-import { type HTTPSServerConnectionOptions } from 'bare-https'
+import { type HTTPSSocketOptions } from 'bare-https'
 import { HTTPIncomingMessage, type HTTPServerConnectionOptions } from 'bare-http1'
 import { Socket as TCPSocket, type TCPSocketAddress } from 'bare-tcp'
 import EventEmitter from 'bare-events'
@@ -9,7 +9,7 @@ import WebSocketError from './errors'
 interface WebSocketServerOptions
   extends
     HTTPServerConnectionOptions,
-    HTTPSServerConnectionOptions,
+    HTTPSSocketOptions,
     Pick<WebSocketOptions, 'maxPayload' | 'maxFragments' | 'idleTimeout'> {
   secure?: boolean
 
